@@ -309,3 +309,90 @@ class FPN(nn.Module):
         # b, 512, 52, 52
         return fq
 
+# ---------- MBA Neck (Bi-direction Cross-Attention) ----------
+class MultiModalBlock(nn.Module):
+    """
+    一層最小 MBA：Image->Text  &  Text->Image  交叉注意力
+    """
+    def __init__(self, v_dim, t_dim, n_heads=8):
+        super().__init__()
+        self.v2t_attn = nn.MultiheadAttention(embed_dim=t_dim, num_heads=n_heads)
+        self.t2v_attn = nn.MultiheadAttention(embed_dim=v_dim, num_heads=n_heads)
+        self.v_ln = nn.LayerNorm(v_dim)
+        self.t_ln = nn.LayerNorm(t_dim)
+
+    def forward(self, v_feat, t_tok):
+        """
+        v_feat : (B, C, H, W)
+        t_tok  : (B, L, C_t)
+        return : 更新後 v_feat , t_tok
+        """
+        B, C, H, W = v_feat.shape
+        L = t_tok.size(1)
+        # --- Image→Text ---
+        t_in = self.t_ln(t_tok)                   # (B,L,C_t)
+        v_flat = v_feat.flatten(2).permute(2,0,1) # (HW,B,C)
+        t_q = t_in.permute(1,0,2)                 # (L,B,C_t)
+        t_ctx, _ = self.v2t_attn(t_q, v_flat, v_flat)
+        t_tok = t_tok + t_ctx.permute(1,0,2)
+
+        # --- Text→Image ---
+        v_in = self.v_ln(v_feat.flatten(2).permute(2,0,1))  # (HW,B,C)
+        t_kv = t_tok.permute(1,0,2)                         # (L,B,C_t)
+        v_ctx, _ = self.t2v_attn(v_in, t_kv, t_kv)
+        v_feat = v_feat + v_ctx.permute(1,2,0).view(B, C, H, W)
+
+        return v_feat, t_tok
+
+
+class MBANeck(nn.Module):
+    """
+    替代原 FPN 的 Multi-scale Bi-direction Attention Neck
+    in_channels     : backbone 3 個 stage 的通道
+    embed_dim       : token / 最深視覺特徵通道 (預設 512)
+    """
+    def __init__(self,
+                 in_channels=[128, 256, 512],
+                 embed_dim=512,
+                 n_heads=8):
+        super().__init__()
+
+        # 把 backbone 每層通道轉成同一維度 (embed_dim)
+        self.v_proj = nn.ModuleList([
+            nn.Conv2d(c, embed_dim, kernel_size=1) for c in in_channels[::-1]
+        ])  # 先處理 v5, v4, v3 的順序
+
+        self.t_proj = nn.Linear(embed_dim, embed_dim)
+
+        # 3 個 MultiModalBlock（對應 backbone 3 層）
+        self.mba = nn.ModuleList([
+            MultiModalBlock(embed_dim, embed_dim, n_heads) for _ in range(3)
+        ])
+
+        # 聚合成輸出 256 channels (與舊 FPN 對齊)
+        self.out_conv = nn.Sequential(
+            nn.Conv2d(embed_dim, embed_dim, 3, padding=1, bias=False),
+            nn.BatchNorm2d(embed_dim), nn.GELU()
+        )
+
+    def forward(self, imgs, txt_tok):
+        """
+        imgs    : list[ v3 , v4 , v5 ]，各 shape=(B,C_i,H_i,W_i)  (注意順序!)
+        txt_tok : (B, L, embed_dim)
+        return  : fq  (B,256,52,52)  與舊 FPN 相同
+        """
+        v_feats = imgs[::-1]          # 變成 [v5,v4,v3]
+        B, _, _, _ = v_feats[0].shape
+        t_feat = self.t_proj(txt_tok) # (B,L,embed_dim)
+
+        agg = None
+        for i, (v, proj, mba) in enumerate(zip(v_feats, self.v_proj, self.mba)):
+            v = proj(v)                       # 換通道
+            v, t_feat = mba(v, t_feat)        # 雙向 attention
+
+            # 上採到 52×52 後累加
+            v_up = F.interpolate(v, size=(52, 52), mode='bilinear', align_corners=False)
+            agg = v_up if agg is None else agg + v_up
+
+        fq = self.out_conv(agg)               # b,256,52,52
+        return fq

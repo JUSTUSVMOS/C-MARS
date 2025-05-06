@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .layers import FPN, Projector, TransformerDecoder
+# from .layers import FPN, Projector, TransformerDecoder
+from .layers import MBANeck, Projector, TransformerDecoder
 from .clip import CLIP  
 
 class CRIS(nn.Module):
@@ -12,7 +13,10 @@ class CRIS(nn.Module):
         txt_length = cfg.word_len  
         self.backbone = CLIP(cfg, input_shape, txt_length)
         # Multi-Modal FPN
-        self.neck = FPN(in_channels=cfg.fpn_in, out_channels=cfg.fpn_out)
+        # self.neck = FPN(in_channels=cfg.fpn_in, out_channels=cfg.fpn_out)
+        self.neck = MBANeck(in_channels=cfg.fpn_in,      # e.g. [128,256,512]
+                    embed_dim=cfg.vis_dim,       # 512
+                    n_heads=cfg.num_head)
         # Decoder
         self.decoder = TransformerDecoder(num_layers=cfg.num_layers,
                                           d_model=cfg.vis_dim,
@@ -50,7 +54,8 @@ class CRIS(nn.Module):
         #     print(f"Feature {i}: {feature.shape}")
             
         try:
-            fq = self.neck(imgs, state)
+            # fq = self.neck(imgs, state)
+            fq = self.neck(imgs, word)
             # print(f"FPN output shape: {fq.shape}")
         except Exception as e:
             # print(f"Error in FPN: {e}")

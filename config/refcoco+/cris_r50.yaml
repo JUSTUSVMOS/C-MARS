@@ -1,0 +1,56 @@
+DATA:
+  dataset: refcoco+
+  train_lmdb: datasets/lmdb/refcoco+/train.lmdb
+  train_split: train
+  val_lmdb: datasets/lmdb/refcoco+/testB.lmdb
+  val_split: testB
+  mask_root: datasets/masks/refcoco+
+TRAIN:
+  # Base Arch
+  # clip_pretrain: pretrain/RN50.pt
+  input_size: 416
+  INPUT_SHAPE: [3, 416, 416]
+  word_len: 17
+  word_dim: 640
+  vis_dim: 640
+  fpn_in: [128, 256, 512]
+  fpn_out: [256, 640, 1024]
+  sync_bn: True
+  # Decoder
+  num_layers: 4
+  num_head: 10
+  dim_ffn: 2048
+  dropout: 0.2
+  intermediate: False
+  # Training Setting
+  workers: 16  # data loader workers
+  workers_val: 16
+  epochs: 60
+  milestones: [35]
+  start_epoch: 0
+  batch_size: 6  # batch size for training
+  batch_size_val: 6  # batch size for validation during training, memory and speed tradeoff
+  base_lr: 0.0001
+  lr_decay: 0.1
+  lr_multi: 0.1
+  weight_decay: 0.
+  max_norm: 0.
+  manual_seed: 0
+  print_freq: 1000
+  # Resume & Save
+  exp_name: CRIS_R50
+  output_folder: exp/refcoco+
+  save_freq: 1
+  weight:  # path to initial weight (default: none)
+  resume:  
+  evaluate: True  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
+Distributed:
+  dist_url: tcp://localhost:3681
+  dist_backend: 'nccl'
+  multiprocessing_distributed: False
+  world_size: 1
+  rank: 0
+TEST:
+  test_split: val-test
+  test_lmdb: datasets/lmdb/refcoco+/val.lmdb
+  visualize: False

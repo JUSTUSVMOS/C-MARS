@@ -1,0 +1,20 @@
+# 排除單一檔案
+0.35)
+cuda.cu
+cuda
+datasets.zip
+
+# 排除資料夾
+exp/
+datasets/
+detectron2/
+img/
+
+# 排除 pretrain 中的 RN50pt 資料夾
+pretrain/RN50.pt/
+
+# 排除 utils 中的特定檔案
+utils/bpe_simple_vocab_16e6.txt.gz
+
+
+__pycache__/

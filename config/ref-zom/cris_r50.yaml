@@ -4,7 +4,7 @@ DATA:
   train_split: train
   val_lmdb: ./datasets/lmdb/ref-zom/val.lmdb
   val_split: val
-  mask_root: ./datasets/masks/ref-zom
+  mask_root: ""
 
 TRAIN:
   input_size: 416

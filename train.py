@@ -15,6 +15,7 @@ import torch.optim
 import torch.utils.data as data
 from loguru import logger
 from torch.optim.lr_scheduler import MultiStepLR, ExponentialLR
+from torch.utils.data.dataloader import default_collate
 
 import utils.config as config
 # import wandb
@@ -28,6 +29,9 @@ from utils.misc import (init_random_seed, set_random_seed, setup_logger,
 warnings.filterwarnings("ignore")
 cv2.setNumThreads(0)
 
+def safe_collate(batch):
+    batch = [b for b in batch if b is not None]   # 篩掉 dataset 回傳 None
+    return default_collate(batch) if batch else None
 
 def get_parser():
     parser = argparse.ArgumentParser(
@@ -121,19 +125,25 @@ def main():
                       num_workers=args.workers,
                       rank=0,  # 单GPU训练时 rank 设置为 0
                       seed=args.manual_seed)
-    train_loader = data.DataLoader(train_data,
-                                   batch_size=args.batch_size,
-                                   shuffle=True,
-                                   num_workers=args.workers,
-                                   pin_memory=True,
-                                   worker_init_fn=init_fn,
-                                   drop_last=True)
-    val_loader = data.DataLoader(val_data,
-                                 batch_size=args.batch_size_val,
-                                 shuffle=False,
-                                 num_workers=args.workers_val,
-                                 pin_memory=True,
-                                 drop_last=False)
+    train_loader = data.DataLoader(
+        train_data,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.workers,
+        pin_memory=True,
+        worker_init_fn=init_fn,
+        drop_last=True,
+        collate_fn=safe_collate)          # <── 這行
+
+    val_loader = data.DataLoader(
+        val_data,
+        batch_size=args.batch_size_val,
+        shuffle=False,
+        num_workers=args.workers_val,
+        pin_memory=True,
+        drop_last=False,
+    collate_fn=safe_collate)          # <── 這行
+
 
     best_IoU = 0.0
     # resume

@@ -25,7 +25,7 @@ from model import build_segmenter
 from utils.misc import (init_random_seed, set_random_seed, setup_logger,
                         worker_init_fn)
 
-
+torch.backends.cudnn.benchmark = True
 warnings.filterwarnings("ignore")
 cv2.setNumThreads(0)
 
@@ -142,7 +142,8 @@ def main():
         num_workers=args.workers_val,
         pin_memory=True,
         drop_last=False,
-    collate_fn=safe_collate)          # <── 這行
+        persistent_workers=True,
+        collate_fn=safe_collate)          # <── 這行
 
 
     best_IoU = 0.0
@@ -196,7 +197,6 @@ def main():
 
         # update lr
         scheduler.step(epoch_log)
-        torch.cuda.empty_cache()
 
     time.sleep(2)
 

@@ -159,7 +159,18 @@ class RefDataset(Dataset):
             h, w = img.shape[:2]
 
             # load or decode mask
-            seg_id    = ref.get('seg_id', index)
+            # --- utils/dataset.py -------------
+            # 找到 __getitem__() 裡這段
+            seg_id = ref.get('seg_id', index)
+
+            # ➜ 改成 ↓
+            seg_id_raw = ref.get('seg_id', index)
+            if isinstance(seg_id_raw, (list, tuple)):
+                seg_id = seg_id_raw[0] if seg_id_raw else index      # 空 list → 用 index
+            else:
+                seg_id = seg_id_raw
+            seg_id = int(seg_id)                                     # 保證是可用來命名的整數
+
             mask_path = os.path.join(self.mask_dir, f"{seg_id}.png")
             if 'mask' in ref and ref['mask'] is not None:
                 m = cv2.imdecode(
@@ -204,15 +215,28 @@ class RefDataset(Dataset):
             img_t.div_(255.).sub_(self.mean).div_(self.std)
             mask_t = torch.from_numpy(mask).float()
 
-            if self.mode in ['val', 'test']:
+            # ---------- 返回 ----------
+            if self.mode == 'val':
+                # 验证集 3 元组 (保持与原代码一致)
                 return img_t, word_vec, {
-                    'mask_dir': mask_path,
-                    'inverse' : mat_inv,
-                    'ori_size': np.array((h, w))
+                    'mask_dir': [mask_path],            # list[str]
+                    'inverse' : [mat_inv],              # list[numpy]
+                    'ori_size': [np.array([h, w])]      # list[numpy]
                 }
+            elif self.mode == 'test':
+                # 推断集只返回 2 元组：img 和 params
+                params = {
+                    'mask_dir': mask_path,              # str
+                    'inverse' : mat_inv,                # numpy (2×3)
+                    'ori_size': np.array([h, w]),       # numpy (2,)
+                    'sents'   : sents,                  # list[str]
+                    'seg_id'  : torch.tensor(seg_id),   # tensor()
+                    'ori_img' : torch.from_numpy(img)   # H×W×3 RGB
+                }
+                return img_t, params
             else:
+                # train
                 return img_t, word_vec, mask_t
-
         except Exception as e:
             print(f"[ERROR] Failed to process sample {index}: {e}")
             return None

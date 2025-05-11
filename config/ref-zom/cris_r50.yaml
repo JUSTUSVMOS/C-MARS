@@ -20,9 +20,9 @@ TRAIN:
   dim_ffn: 2048
   dropout: 0.1
   intermediate: False
-  workers: 0
-  workers_val: 64
-  epochs: 20
+  workers: 4
+  workers_val: 4
+  epochs: 50
   milestones: [10, 20]
   start_epoch: 0
   batch_size: 7  

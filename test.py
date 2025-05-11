@@ -68,20 +68,20 @@ def main():
     test_loader = torch.utils.data.DataLoader(test_data,
                                               batch_size=1,
                                               shuffle=False,
-                                              num_workers=0,
+                                              num_workers=24,
                                               pin_memory=True)
 
     # build model
     model, _ = build_segmenter(args)
     model = model.to(device) 
     # model = model.cuda()
-    logger.info(model)
+    # logger.info(model)
 
-    args.model_dir = os.path.join(args.output_dir, "best_model.pth")
+    args.model_dir = os.path.join(args.output_dir, "66.1.pth")
     if os.path.isfile(args.model_dir):
         logger.info("=> loading checkpoint '{}'".format(args.model_dir))
         checkpoint = torch.load(args.model_dir)
-        model.load_state_dict(checkpoint['state_dict'], strict=False)
+        model.load_state_dict(checkpoint['state_dict'], strict=True)
         logger.info("=> loaded checkpoint '{}'".format(args.model_dir))
     else:
         raise ValueError(

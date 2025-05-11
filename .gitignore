@@ -1,8 +1,8 @@
 # ┌───────────────────────────────────────────────
 # │ Byte-compiled files and caches
 # └───────────────────────────────────────────────
-__pycache__/
 **/__pycache__/
+__pycache__/
 *.py[cod]
 *.so
 
@@ -15,24 +15,18 @@ _cache/**
 # ┌───────────────────────────────────────────────
 # │ Data directories and archives
 # └───────────────────────────────────────────────
-datasets/             # raw or extracted datasets
-detectron2/           # detectron2 outputs
-exp/                  # experiment outputs
-img/                  # temporary visualizations
-datasets.zip          # dataset archive
-
-# ┌───────────────────────────────────────────────
-# │ GPU/build artifacts
-# └───────────────────────────────────────────────
-cuda/
-*.cu
+datasets/
+datasets.zip
+detectron2/
+exp/
+img/
 
 # ┌───────────────────────────────────────────────
 # │ Pretrained model checkpoints
 # └───────────────────────────────────────────────
-pretrain/RN50.pt/
+pretrain/RN50.pt
 
 # ┌───────────────────────────────────────────────
-# │ Large files in utils/
+# │ Large files in utils
 # └───────────────────────────────────────────────
 utils/bpe_simple_vocab_16e6.txt.gz

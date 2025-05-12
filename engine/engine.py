@@ -1,5 +1,14 @@
-# engine/engine.py
-import os, time, cv2, numpy as np, torch
+'''engine/engine.py
+
+This module provides training, validation, and inference routines for the segmentation model.
+'''
+
+import os
+import time
+
+import cv2
+import numpy as np
+import torch
 import torch.cuda.amp as amp
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -8,184 +17,253 @@ from loguru import logger
 from utils.dataset import tokenize
 from utils.misc import AverageMeter, ProgressMeter, trainMetricGPU
 
-# ──────────────────────────────  Train  ────────────────────────────── #
+# ------------------------ Training ------------------------ #
 def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
+    """
+    Execute one epoch of training.
+
+    Args:
+        train_loader: DataLoader for training data.
+        model: PyTorch model to train.
+        optimizer: Optimizer for model updates.
+        scheduler: Learning rate scheduler.
+        scaler: GradScaler for mixed precision.
+        epoch: Current epoch number.
+        args: Arguments namespace with settings.
+    """
+    # Initialize meters
     batch_time = AverageMeter('Batch', ':2.2f')
-    data_time  = AverageMeter('Data',  ':2.2f')
-    lr_meter   = AverageMeter('Lr',    ':1.6f')
-    loss_m     = AverageMeter('Loss',  ':2.4f')
-    iou_m      = AverageMeter('IoU',   ':2.2f')
-    pr_m       = AverageMeter('Prec@50', ':2.2f')
-    prog = ProgressMeter(len(train_loader),
-                         [batch_time, data_time, lr_meter, loss_m, iou_m, pr_m],
-                         prefix=f"Training: Epoch=[{epoch}/{args.epochs}]")
+    data_time = AverageMeter('Data', ':2.2f')
+    lr_meter = AverageMeter('LR', ':1.6f')
+    loss_meter = AverageMeter('Loss', ':2.4f')
+    iou_meter = AverageMeter('IoU', ':2.2f')
+    prec_meter = AverageMeter('Prec@50', ':2.2f')
 
-    model.train();  time.sleep(2);  end = time.time()
-    train_loader = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}",
-                        ncols=120, mininterval=120)
+    progress = ProgressMeter(
+        len(train_loader),
+        [batch_time, data_time, lr_meter, loss_meter, iou_meter, prec_meter],
+        prefix=f"Training Epoch [{epoch}/{args.epochs}]"
+    )
 
-    for i, (img, txt, tgt) in enumerate(train_loader):
+    model.train()
+    time.sleep(2)  # Warm-up delay
+    end = time.time()
+
+    loader = tqdm(
+        train_loader,
+        desc=f"Epoch {epoch}/{args.epochs}",
+        ncols=120,
+        mininterval=args.print_freq
+    )
+
+    for idx, (img, txt, tgt) in enumerate(loader, start=1):
+        # Measure data loading time
         data_time.update(time.time() - end)
+
+        # Move tensors to device
         img, txt, tgt = (x.to(args.device, non_blocking=True) for x in (img, txt, tgt))
         tgt = tgt.unsqueeze(1)
 
+        # Forward pass with mixed precision
         with amp.autocast():
-            pred, tgt, loss = model(img, txt, tgt)
+            pred, tgt_mask, loss = model(img, txt, tgt)
 
+        # Backward and optimization
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         if args.max_norm:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_norm)
-        scaler.step(optimizer);  scaler.update()
+        scaler.step(optimizer)
+        scaler.update()
 
-        iou, pr5 = trainMetricGPU(pred, tgt, 0.35, 0.5)
-        loss_m.update(loss.item(), img.size(0))
-        iou_m .update(iou .item(), img.size(0))
-        pr_m  .update(pr5.item(), img.size(0))
+        # Compute metrics
+        iou_val, prec5 = trainMetricGPU(pred, tgt_mask, 0.35, 0.5)
+        loss_meter.update(loss.item(), img.size(0))
+        iou_meter.update(iou_val.item(), img.size(0))
+        prec_meter.update(prec5.item(), img.size(0))
         lr_meter.update(scheduler.get_last_lr()[-1])
-        batch_time.update(time.time() - end);  end = time.time()
+        batch_time.update(time.time() - end)
+        end = time.time()
 
-        if (i + 1) % args.print_freq == 10:
-            prog.display(i + 1)
-            train_loader.set_postfix(Loss=loss_m.avg, IoU=iou_m.avg,
-                                     Prec50=pr_m.avg, Lr=lr_meter.avg,
-                                     Time=batch_time.avg)
+        # Display progress
+        if idx % args.print_freq == 0:
+            progress.display(idx)
+            loader.set_postfix(
+                Loss=loss_meter.avg,
+                IoU=iou_meter.avg,
+                Prec50=prec_meter.avg,
+                LR=lr_meter.avg,
+                Time=batch_time.avg
+            )
 
-# ────────────────────────────── Validate ────────────────────────────── #
+    # Step scheduler after epoch
+    scheduler.step()
+
+
+# ------------------------ Validation ------------------------ #
 @torch.no_grad()
 def validate(val_loader, model, epoch, args):
-    def first(x):
-        if isinstance(x, (list, tuple)):       return x[0]
-        if torch.is_tensor(x) and x.ndim:      return x[0]
-        if isinstance(x, np.ndarray) and x.ndim: return x[0]
+    """
+    Execute validation over the dataset.
+
+    Args:
+        val_loader: DataLoader for validation data.
+        model: PyTorch model to evaluate.
+        epoch: Current epoch number.
+        args: Arguments namespace with settings.
+
+    Returns:
+        mean IoU and precision dictionary.
+    """
+    def first_element(x):
+        if isinstance(x, (list, tuple)):
+            return x[0]
+        if torch.is_tensor(x) and x.ndim:
+            return x[0]
+        if isinstance(x, np.ndarray) and x.ndim:
+            return x[0]
         return x
 
     model.eval()
-    iou_acc = []
+    iou_list = []
+    loader = tqdm(val_loader, desc=f"Validation {epoch}/{args.epochs}", ncols=100)
 
-    tbar = tqdm(val_loader, desc=f"Validation {epoch}/{args.epochs}", ncols=100)
-    for imgs, texts, param in tbar:
-        imgs  = imgs.to(args.device, non_blocking=True)
+    for imgs, texts, params in loader:
+        imgs = imgs.to(args.device, non_blocking=True)
         texts = texts.to(args.device, non_blocking=True)
 
+        # Predict and apply sigmoid
         preds = torch.sigmoid(model(imgs, texts))
         if preds.shape[-2:] != imgs.shape[-2:]:
-            preds = F.interpolate(preds, size=imgs.shape[-2:], mode='bicubic',
-                                  align_corners=True)
+            preds = F.interpolate(
+                preds,
+                size=imgs.shape[-2:],
+                mode='bicubic',
+                align_corners=True
+            )
 
-        for pred, md, M, osz in zip(preds,
-                                    param['mask_dir'],
-                                    param['inverse'],
-                                    param['ori_size']):
-            h, w = map(int, first(osz))
-            M    = np.array(first(M))
-            pred = pred.squeeze().cpu().numpy()
-            pred = cv2.warpAffine(pred, M, (w, h), flags=cv2.INTER_CUBIC) > 0.35
+        for pred, mask_path, inv_mat, orig_size in zip(
+            preds, params['mask_dir'], params['inverse'], params['ori_size']
+        ):
+            # Restore original shape and warp back
+            h, w = map(int, first_element(orig_size))
+            M = np.array(first_element(inv_mat))
+            pred_np = pred.squeeze().cpu().numpy()
+            pred_warped = cv2.warpAffine(pred_np, M, (w, h), flags=cv2.INTER_CUBIC) > 0.35
 
-            mask = cv2.imread(first(md), cv2.IMREAD_GRAYSCALE)
+            mask = cv2.imread(first_element(mask_path), cv2.IMREAD_GRAYSCALE)
             if mask is None:
                 continue
-            mask = mask/255.
+            mask = mask.astype(np.float32) / 255.0
 
-            # shape 容錯
-            if pred.shape != mask.shape:
-                if pred.T.shape == mask.shape:
-                    pred = pred.T
-                elif mask.T.shape == pred.shape:
+            # Shape tolerance
+            if pred_warped.shape != mask.shape:
+                if pred_warped.T.shape == mask.shape:
+                    pred_warped = pred_warped.T
+                elif mask.T.shape == pred_warped.shape:
                     mask = mask.T
                 else:
-                    mask = cv2.resize(mask, pred.shape[::-1],
-                                      interpolation=cv2.INTER_NEAREST)
+                    mask = cv2.resize(mask, pred_warped.shape[::-1], interpolation=cv2.INTER_NEAREST)
 
-            # zero-mask rule
+            # Zero-mask rule
             if mask.sum() == 0:
-                iou = 1.0 if pred.sum() == 0 else 0.0
+                iou_val = 1.0 if pred_warped.sum() == 0 else 0.0
             else:
-                inter = np.logical_and(pred, mask)
-                union = np.logical_or(pred,  mask)
-                iou   = inter.sum() / (union.sum()+1e-6)
-            iou_acc.append(iou)
+                inter = np.logical_and(pred_warped, mask)
+                union = np.logical_or(pred_warped, mask)
+                iou_val = inter.sum() / (union.sum() + 1e-6)
 
-    ious_t = torch.tensor(iou_acc, device=args.device)
-    prec = {f'Pr@{t}0': (ious_t > t/10).float().mean().item()
-            for t in range(5,10)}
-    return ious_t.mean().item(), prec
+            iou_list.append(iou_val)
 
-    return ious.mean().item(), prec
+    ious_tensor = torch.tensor(iou_list, device=args.device)
+    precision = {f'Pr@{t}0': (ious_tensor > t/10).float().mean().item() for t in range(5, 10)}
 
-# ────────────────────────────── Inference ───────────────────────────── #
-# engine/engine.py
-import os, time, cv2, numpy as np, torch
-import torch.nn.functional as F
-from tqdm import tqdm
-from loguru import logger
-from utils.dataset import tokenize
-from utils.misc import AverageMeter, ProgressMeter, trainMetricGPU
+    return ious_tensor.mean().item(), precision
 
-# ---------- train / validate 與原先一致，略 ---------- #
-# （此處保留你的 train()、validate()，未做任何改動）
 
-# ---------------------------- Inference ---------------------------- #
+# ------------------------ Inference ------------------------ #
 @torch.no_grad()
 def inference(test_loader, model, args):
-    def first(x):
-        if isinstance(x,(list,tuple)):      return x[0]
-        if torch.is_tensor(x) and x.ndim:   return x[0]
-        if isinstance(x,np.ndarray) and x.ndim: return x[0]
+    """
+    Run inference on test data and compute metrics.
+
+    Args:
+        test_loader: DataLoader for test data.
+        model: PyTorch model to evaluate.
+        args: Arguments namespace with settings.
+
+    Returns:
+        mean IoU and empty dict for consistency.
+    """
+    def first_element(x):
+        if isinstance(x, (list, tuple)):
+            return x[0]
+        if torch.is_tensor(x) and x.ndim:
+            return x[0]
+        if isinstance(x, np.ndarray) and x.ndim:
+            return x[0]
         return x
 
-    ious=[];  model.eval();  time.sleep(2)
-    tbar=tqdm(test_loader, desc='Inference', ncols=100)
+    model.eval()
+    time.sleep(2)  # Warm-up delay
+    iou_list = []
+    loader = tqdm(test_loader, desc='Inference', ncols=100)
 
-    for img, param in tbar:
+    for img, params in loader:
         img = img.to(args.device, non_blocking=True)
 
-        mask_path = first(param['mask_dir'])
-        mask_raw  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask_raw is None:      # 缺檔跳過
+        mask_path = first_element(params['mask_dir'])
+        mask_raw = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask_raw is None:
+            # Skip missing files
             continue
-        mask_raw = mask_raw / 255.
+        mask = mask_raw.astype(np.float32) / 255.0
 
-        M_inv = np.array(first(param['inverse']))
-        h, w  = map(int, first(param['ori_size']))
-        sents = first(param['sents'])
-        N     = len(sents)
+        inv_mat = np.array(first_element(params['inverse']))
+        h, w = map(int, first_element(params['ori_size']))
+        sentences = first_element(params['sents'])
+        num_sent = len(sentences)
 
-        # ----- batch pairing (影像重複 N 份) -----
-        img_batch = img.repeat(N,1,1,1)                       # N×3×H×W
-        txt_batch = tokenize(sents, args.word_len, True).to(args.device)
+        # Batch pairing (repeat image N times)
+        img_batch = img.repeat(num_sent, 1, 1, 1)
+        txt_batch = tokenize(sentences, args.word_len, True).to(args.device)
 
-        preds = torch.sigmoid(model(img_batch, txt_batch))    # N×1×h×w
+        preds = torch.sigmoid(model(img_batch, txt_batch))
         if preds.shape[-2:] != img.shape[-2:]:
-            preds = F.interpolate(preds, size=img.shape[-2:], mode='bicubic',
-                                  align_corners=True)
+            preds = F.interpolate(
+                preds,
+                size=img.shape[-2:],
+                mode='bicubic',
+                align_corners=True
+            )
 
         for pred in preds:
-            pred = pred.squeeze().cpu().numpy()
-            pred = cv2.warpAffine(pred, M_inv, (w,h),
-                                   flags=cv2.INTER_CUBIC) > 0.35
+            pred_np = pred.squeeze().cpu().numpy()
+            pred_warped = cv2.warpAffine(pred_np, inv_mat, (w, h), flags=cv2.INTER_CUBIC) > 0.35
 
-            mask = mask_raw.copy()
-            # ---- shape align ----
-            if pred.shape != mask.shape:
-                if pred.T.shape == mask.shape: pred = pred.T
-                elif mask.T.shape == pred.shape: mask = mask.T
-                else: mask = cv2.resize(mask, (pred.shape[1], pred.shape[0]),
-                                        interpolation=cv2.INTER_NEAREST)
+            # Shape alignment
+            if pred_warped.shape != mask.shape:
+                if pred_warped.T.shape == mask.shape:
+                    pred_warped = pred_warped.T
+                elif mask.T.shape == pred_warped.shape:
+                    mask = mask.T
+                else:
+                    mask = cv2.resize(mask, (pred_warped.shape[1], pred_warped.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-            # ---- IoU with zero-rule ----
+            # Compute IoU with zero-mask rule
             if mask.sum() == 0:
-                iou = 1.0 if pred.sum()==0 else 0.0
+                iou_val = 1.0 if pred_warped.sum() == 0 else 0.0
             else:
-                inter = np.logical_and(pred, mask)
-                union = np.logical_or(pred,  mask)
-                iou   = inter.sum() / (union.sum()+1e-6)
-            ious.append(iou)
+                inter = np.logical_and(pred_warped, mask)
+                union = np.logical_or(pred_warped, mask)
+                iou_val = inter.sum() / (union.sum() + 1e-6)
+            iou_list.append(iou_val)
 
-    # --------- report ---------
-    ious_t=torch.tensor(ious, device=args.device)
+    # Report metrics
+    ious_tensor = torch.tensor(iou_list, device=args.device)
     logger.info('=> Metric Calculation <=')
-    logger.info(f"IoU={ious_t.mean()*100:.2f}")
-    for t in range(5,10):
-        logger.info(f"Pr@{t}0: {(ious_t>t/10).float().mean()*100:.2f}")
-    return ious_t.mean().item(), {}
+    logger.info(f"IoU={ious_tensor.mean()*100:.2f}%")
+    for t in range(5, 10):
+        logger.info(f"Pr@{t}0: {(ious_tensor > t/10).float().mean()*100:.2f}%")
+
+    return ious_tensor.mean().item(), {}

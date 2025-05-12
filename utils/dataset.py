@@ -39,8 +39,8 @@ info = {
         'val-test': 5000
     },
     'ref-zom': {
-        'train': 57624, 
-        'val': 5762, 
+        'train': 57624,
+        'val': 5762,
         'test': 15406
     }
 }
@@ -50,21 +50,22 @@ def tokenize(texts: Union[str, List[str]],
              context_length: int = 77,
              truncate: bool = False) -> torch.LongTensor:
     """
-    Returns the tokenized representation of given input string(s).
+    Tokenize input string(s) into CLIP-compatible tokens.
 
     Parameters
     ----------
     texts : Union[str, List[str]]
-        An input string or a list of input strings to tokenize.
+        Single string or list of strings to tokenize.
     context_length : int
-        The context length to use; all CLIP models use 77 by default.
+        Maximum sequence length (default: 77).
     truncate : bool
-        Whether to truncate texts longer than context_length.
+        If True, truncate sequences exceeding context_length;
+        otherwise, raise an error.
 
     Returns
     -------
     torch.LongTensor
-        A tensor of shape (len(texts), context_length).
+        Tensor of shape (len(texts), context_length) with token IDs.
     """
     if isinstance(texts, str):
         texts = [texts]
@@ -80,21 +81,25 @@ def tokenize(texts: Union[str, List[str]],
                 tokens = tokens[:context_length]
                 tokens[-1] = eot
             else:
-                raise RuntimeError(f"Input {texts[i]!r} too long for context length {context_length}")
+                raise RuntimeError(
+                    f"Input {texts[i]!r} too long for context length {context_length}"
+                )
         result[i, :len(tokens)] = torch.tensor(tokens, dtype=torch.long)
 
     return result
 
 def loads_pickle(buf):
-    """Wrapper around pickle.loads."""
+    """
+    Deserialize bytes using pickle.
+    """
     return pickle.loads(buf)
 
 class RefDataset(Dataset):
     """
-    A generic RefCOCO / RefCOCO+ / G-Ref / Ref-ZOM dataset loader.
+    Dataset loader for RefCOCO, RefCOCO+, G-Ref, and Ref-ZOM.
 
-    Supports automatic decoding of LMDB-embedded masks for Ref-ZOM
-    and uses random.choice to select full Python strings.
+    Automatically decodes LMDB-stored images and masks,
+    and randomly selects one caption string per sample.
     """
 
     def __init__(self,
@@ -110,15 +115,19 @@ class RefDataset(Dataset):
         self.mask_dir    = mask_dir
         self.dataset     = dataset.lower()
         self.split       = split
-        self.mode        = mode           # 'train', 'val' or 'test'
+        self.mode        = mode           # 'train', 'val', or 'test'
         self.input_size  = (input_size, input_size)
         self.word_length = word_length
 
-        # CLIP image normalization parameters
-        self.mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).reshape(3,1,1)
-        self.std  = torch.tensor([0.26862954, 0.26130258, 0.27577711]).reshape(3,1,1)
+        # CLIP image normalization constants
+        self.mean = torch.tensor(
+            [0.48145466, 0.4578275, 0.40821073]
+        ).reshape(3,1,1)
+        self.std  = torch.tensor(
+            [0.26862954, 0.26130254, 0.27577711]
+        ).reshape(3,1,1)
 
-        # open LMDB
+        # Open LMDB database
         self.env = lmdb.open(
             self.lmdb_dir,
             subdir=os.path.isdir(self.lmdb_dir),
@@ -128,10 +137,12 @@ class RefDataset(Dataset):
             self.keys   = loads_pickle(txn.get(b'__keys__'))
             self.length = len(self.keys)
 
-        print(f"[RefDataset] dataset={self.dataset}, split={self.split}, length={self.length}")
+        print(
+            f"[RefDataset] dataset={self.dataset}, split={self.split}, length={self.length}"
+        )
 
-        # for Ref-ZOM, if no mask_dir provided, use a cache folder
-        if self.dataset == 'ref-zom' and (not self.mask_dir or self.mask_dir.strip()==''):
+        # For Ref-ZOM: if no mask_dir is given, create a cache folder
+        if self.dataset == 'ref-zom' and not self.mask_dir:
             cache = os.path.join(os.getcwd(), '_cache', 'masks-refzom')
             os.makedirs(cache, exist_ok=True)
             self.mask_dir = cache
@@ -142,13 +153,15 @@ class RefDataset(Dataset):
     def __getitem__(self, index: int):
         try:
             if index >= self.length:
-                raise IndexError(f"{index} out of range for dataset length {self.length}")
+                raise IndexError(
+                    f"Index {index} out of range for dataset length {self.length}"
+                )
 
-            # fetch record
+            # Fetch record from LMDB
             with self.env.begin(write=False) as txn:
                 ref = loads_pickle(txn.get(self.keys[index]))
 
-            # decode image
+            # Decode image bytes
             ori = cv2.imdecode(
                 np.frombuffer(ref['img'], dtype=np.uint8),
                 cv2.IMREAD_COLOR
@@ -158,93 +171,103 @@ class RefDataset(Dataset):
             img = cv2.cvtColor(ori, cv2.COLOR_BGR2RGB)
             h, w = img.shape[:2]
 
-            # load or decode mask
-            # --- utils/dataset.py -------------
-            # 找到 __getitem__() 裡這段
-            seg_id = ref.get('seg_id', index)
-
-            # ➜ 改成 ↓
-            seg_id_raw = ref.get('seg_id', index)
-            if isinstance(seg_id_raw, (list, tuple)):
-                seg_id = seg_id_raw[0] if seg_id_raw else index      # 空 list → 用 index
+            # Handle seg_id which may be scalar or list
+            raw_id = ref.get('seg_id', index)
+            if isinstance(raw_id, (list, tuple)):
+                seg_id = int(raw_id[0]) if raw_id else index
             else:
-                seg_id = seg_id_raw
-            seg_id = int(seg_id)                                     # 保證是可用來命名的整數
+                seg_id = int(raw_id)
 
             mask_path = os.path.join(self.mask_dir, f"{seg_id}.png")
+
+            # Load or decode mask
             if 'mask' in ref and ref['mask'] is not None:
                 m = cv2.imdecode(
                     np.frombuffer(ref['mask'], dtype=np.uint8),
                     cv2.IMREAD_GRAYSCALE
                 )
+                # Save mask for val/test if not already saved
                 if self.mode != 'train' and not os.path.exists(mask_path):
                     cv2.imwrite(mask_path, m)
                 mask = m
             else:
+                # If no embedded mask, read or create a blank one
                 if not os.path.exists(mask_path):
                     mask = np.zeros((h, w), dtype=np.uint8)
                 else:
                     mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                     if mask is None:
-                        raise ValueError(f"Failed to read mask file at {mask_path}")
+                        raise ValueError(
+                            f"Failed to read mask file at {mask_path}"
+                        )
 
-            # randomly select one sentence (guaranteed to be a Python str)
+            # Randomly choose one caption sentence
             sents = ref.get('sents', [])
             if not sents:
-                raise ValueError(f"No sentences for index {index}")
+                raise ValueError(f"No sentences available for index {index}")
             sent = str(random.choice(sents))
 
-            # affine resize and pad
+            # Compute affine transform for resizing + padding
             mat, mat_inv = self.getTransformMat((h, w))
             border_val = [
-                float(self.mean[0].item() * 255),
-                float(self.mean[1].item() * 255),
-                float(self.mean[2].item() * 255)
+                float(self.mean[i].item() * 255) for i in range(3)
             ]
-            img  = cv2.warpAffine(img,  mat, self.input_size,
-                                  flags=cv2.INTER_CUBIC, borderValue=border_val)
-            mask = cv2.warpAffine(mask, mat, self.input_size,
-                                  flags=cv2.INTER_NEAREST, borderValue=0) / 255.0
+            img  = cv2.warpAffine(
+                img,  mat, self.input_size,
+                flags=cv2.INTER_CUBIC, borderValue=border_val
+            )
+            mask = cv2.warpAffine(
+                mask, mat, self.input_size,
+                flags=cv2.INTER_NEAREST, borderValue=0
+            ) / 255.0
 
-            # tokenize text
+            # Tokenize the chosen sentence
             tokens   = tokenize(sent, self.word_length, truncate=True)
             word_vec = tokens.squeeze(0)
 
-            # convert to tensor and normalize
+            # Convert to tensors and normalize image
             img_t  = torch.from_numpy(img.transpose(2,0,1)).float()
             img_t.div_(255.).sub_(self.mean).div_(self.std)
             mask_t = torch.from_numpy(mask).float()
 
-            # ---------- 返回 ----------
+            # Return based on mode
             if self.mode == 'val':
-                # 验证集 3 元组 (保持与原代码一致)
                 return img_t, word_vec, {
-                    'mask_dir': [mask_path],            # list[str]
-                    'inverse' : [mat_inv],              # list[numpy]
-                    'ori_size': [np.array([h, w])]      # list[numpy]
+                    'mask_dir': [mask_path],
+                    'inverse': [mat_inv],
+                    'ori_size': [np.array([h, w])]
                 }
             elif self.mode == 'test':
-                # 推断集只返回 2 元组：img 和 params
                 params = {
-                    'mask_dir': mask_path,              # str
-                    'inverse' : mat_inv,                # numpy (2×3)
-                    'ori_size': np.array([h, w]),       # numpy (2,)
-                    'sents'   : sents,                  # list[str]
-                    'seg_id'  : torch.tensor(seg_id),   # tensor()
-                    'ori_img' : torch.from_numpy(img)   # H×W×3 RGB
+                    'mask_dir': mask_path,
+                    'inverse': mat_inv,
+                    'ori_size': np.array([h, w]),
+                    'sents': sents,
+                    'seg_id': torch.tensor(seg_id),
+                    'ori_img': torch.from_numpy(img)
                 }
                 return img_t, params
             else:
-                # train
+                # 'train'
                 return img_t, word_vec, mask_t
+
         except Exception as e:
             print(f"[ERROR] Failed to process sample {index}: {e}")
             return None
 
     def getTransformMat(self, size: tuple) -> tuple:
         """
-        Compute affine transformation matrix (and its inverse)
-        to resize and pad the image to input_size.
+        Compute affine transform and its inverse to resize and pad image.
+
+        Parameters
+        ----------
+        size : tuple
+            Original image size (height, width).
+
+        Returns
+        -------
+        (mat, mat_inv)
+            Affine forward and inverse matrices.
         """
         h, w    = size
         ih, iw  = self.input_size
@@ -259,6 +282,8 @@ class RefDataset(Dataset):
         return mat, mat_inv
 
     def __repr__(self) -> str:
-        return (f"{self.__class__.__name__}("
-                f"{self.dataset}:{self.split},mode={self.mode},"
-                f"size={self.input_size},wlen={self.word_length})")
+        return (
+            f"{self.__class__.__name__}("
+            f"{self.dataset}:{self.split},mode={self.mode},"
+            f"size={self.input_size},wlen={self.word_length})"
+        )

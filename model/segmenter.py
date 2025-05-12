@@ -1,81 +1,93 @@
+'''segmenter.py
+
+Defines the C-MARS segmentation model, combining a CLIP-based backbone with
+an MBA neck, Transformer decoder, and final projector.
+'''
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# from .layers import FPN, Projector, TransformerDecoder
 from .layers import MBANeck, Projector, TransformerDecoder
-from .clip import CLIP  
+from .clip import CLIP
 
-class CRIS(nn.Module):
+
+class C_MARS(nn.Module):
+    """
+    Referring Image Segmentation (C-MARS) model using CLIP, MBA neck, decoder, and projector.
+    """
+
     def __init__(self, cfg):
         super().__init__()
-        # Vision & Text Encoder
-        input_shape = cfg.INPUT_SHAPE  # 修改这里，从TRAIN部分获取INPUT_SHAPE
-        txt_length = cfg.word_len  
+        # Input configuration
+        input_shape = cfg.INPUT_SHAPE     # from TRAIN.INPUT_SHAPE
+        txt_length = cfg.word_len         # max token length
+
+        # CLIP backbone for image and text
         self.backbone = CLIP(cfg, input_shape, txt_length)
-        # Multi-Modal FPN
-        # self.neck = FPN(in_channels=cfg.fpn_in, out_channels=cfg.fpn_out)
-        self.neck = MBANeck(in_channels=cfg.fpn_in,      # e.g. [128,256,512]
-                    embed_dim=cfg.vis_dim,       # 512
-                    n_heads=cfg.num_head)
-        # Decoder
-        self.decoder = TransformerDecoder(num_layers=cfg.num_layers,
-                                          d_model=cfg.vis_dim,
-                                          nhead=cfg.num_head,
-                                          dim_ffn=cfg.dim_ffn,
-                                          dropout=cfg.dropout,
-                                          return_intermediate=cfg.intermediate)
-        # Projector
+
+        # MBA neck: fuses visual features and text embeddings
+        self.neck = MBANeck(
+            in_channels=cfg.fpn_in,        # e.g., [128, 256, 512]
+            embed_dim=cfg.vis_dim,         # e.g., 512
+            n_heads=cfg.num_head           # number of attention heads
+        )
+
+        # Transformer decoder for refined features
+        self.decoder = TransformerDecoder(
+            num_layers=cfg.num_layers,
+            d_model=cfg.vis_dim,
+            nhead=cfg.num_head,
+            dim_ffn=cfg.dim_ffn,
+            dropout=cfg.dropout,
+            return_intermediate=cfg.intermediate
+        )
+
+        # Final projector: maps features to logits
+        # Original signature: Projector(in_features, hidden_features, num_layers)
         self.proj = Projector(cfg.word_dim, cfg.vis_dim // 2, 3)
 
     def forward(self, img, word, mask=None):
-        '''
-            img: b, 3, h, w
-            word: b, words
-            word_mask: b, words
-            mask: b, 1, h, w
-        '''
-        # padding mask used in decoder
-        pad_mask = torch.zeros_like(word).masked_fill_(word == 0, 1).bool()
+        """
+        Forward pass.
 
-        # Extract visual features from ConvNeXt
-        vis = self.backbone.extract_features(img)  # 从ConvNeXt中提取特征
-        word, state = self.backbone.encode_text(word)
-        
-        
-        # print("Visual features extracted:")
-        # for key, value in vis.items():
-        #     print(f"{key}: {value.shape}")
+        Args:
+            img: Tensor[B, 3, H, W]
+            word: Tensor[B, T]
+            mask: Tensor[B, 1, H, W], optional for training
 
-        # Process visual features through FPN
-        imgs = [vis['res2'], vis['res3'], vis['res4']]
-        # 调试输出：检查imgs是否是包含三个特征图的列表
-        # print("Features passed to FPN:")
-        # for i, feature in enumerate(imgs):
-        #     print(f"Feature {i}: {feature.shape}")
-            
-        try:
-            # fq = self.neck(imgs, state)
-            fq = self.neck(imgs, word)
-            # print(f"FPN output shape: {fq.shape}")
-        except Exception as e:
-            # print(f"Error in FPN: {e}")
-            raise
+        Returns:
+            (pred, mask_resized, loss) in training, else pred
+        """
+        # Create padding mask for text (True where token == 0)
+        pad_mask = (word == 0)
 
-        if fq is None:
-            raise ValueError("FPN did not return a valid output")
+        # Extract multi-scale visual features
+        vis_feats = self.backbone.extract_features(img)
+        # Encode text tokens
+        word_embed, text_state = self.backbone.encode_text(word)
 
-        b, c, h, w = fq.size()
-        fq = self.decoder(fq, word, pad_mask)
-        fq = fq.reshape(b, c, h, w)
+        # Prepare FPN inputs
+        features = [vis_feats['res2'], vis_feats['res3'], vis_feats['res4']]
 
-        # Generate final predictions
-        pred = self.proj(fq, state)
+        # Fuse via MBA neck
+        fused = self.neck(features, word_embed)
+        if fused is None:
+            raise ValueError("MBA neck returned None; expected Tensor")
+
+        # Decode features
+        B, C, H, W = fused.size()
+        decoded = self.decoder(fused, word_embed, pad_mask)
+        decoded = decoded.view(B, C, H, W)
+
+        # Generate mask logits
+        pred = self.proj(decoded, text_state)
 
         if self.training:
-            # Resize mask to match prediction size
-            if pred.shape[-2:] != mask.shape[-2:]:
+            # Resize ground-truth mask to match pred
+            if mask is not None and pred.shape[-2:] != mask.shape[-2:]:
                 mask = F.interpolate(mask, pred.shape[-2:], mode='nearest').detach()
+            # Compute BCE loss
             loss = F.binary_cross_entropy_with_logits(pred, mask)
             return pred.detach(), mask, loss
-        else:
-            return pred.detach()
+
+        return pred.detach()

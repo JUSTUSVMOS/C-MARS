@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 import warnings
 
 import cv2
@@ -40,7 +41,7 @@ def get_parser():
 @logger.catch
 def main():
     args = get_parser()
-    args.output_dir = os.path.join(args.output_folder, args.exp_name)
+    args.output_dir = args.output_folder
     if args.visualize:
         args.vis_dir = os.path.join(args.output_dir, "vis")
         os.makedirs(args.vis_dir, exist_ok=True)
@@ -74,10 +75,8 @@ def main():
     # build model
     model, _ = build_segmenter(args)
     model = model.to(device) 
-    # model = model.cuda()
-    # logger.info(model)
 
-    args.model_dir = os.path.join(args.output_dir, "66.1.pth")
+    args.model_dir = os.path.join(args.output_dir, "last_model.pth")
     if os.path.isfile(args.model_dir):
         logger.info("=> loading checkpoint '{}'".format(args.model_dir))
         checkpoint = torch.load(args.model_dir)
@@ -88,8 +87,14 @@ def main():
             "=> resume failed! no checkpoint found at '{}'. Please check args.resume again!"
             .format(args.model_dir))
 
-    # inference
-    inference(test_loader, model, args)
+    # inference with FPS measurement
+    start_time = time.time()
+    mean_iou, _ = inference(test_loader, model, args)
+    elapsed = time.time() - start_time
+    num_batches = len(test_loader)
+    fps = num_batches / elapsed if elapsed > 0 else float('inf')
+    logger.info(f"Average FPS: {fps:.2f}")
+    print(f"Average FPS: {fps:.2f}")
 
 
 if __name__ == '__main__':

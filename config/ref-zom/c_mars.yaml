@@ -34,19 +34,12 @@ TRAIN:
   max_norm: 0.
   manual_seed: 0
   print_freq: 100
-  exp_name: CRIS_R50
+  exp_name: 
   output_folder: exp/ref-zom
   save_freq: 1
   weight: 
   resume: 
   evaluate: True
-
-Distributed:
-  dist_url: tcp://localhost:3681
-  dist_backend: 'nccl'
-  multiprocessing_distributed: False
-  world_size: 1
-  rank: 0
 
 TEST:
   test_split: test

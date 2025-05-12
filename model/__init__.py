@@ -1,8 +1,8 @@
-from .segmenter import CRIS
+from .segmenter import C_MARS
 from loguru import logger
 
 def build_segmenter(args):
-    model = CRIS(args)
+    model = C_MARS(args)
     backbone = []
     head = []
     for k, v in model.named_parameters():

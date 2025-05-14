@@ -28,8 +28,9 @@ class C_MARS(nn.Module):
         # MBA neck: fuses visual features and text embeddings
         self.neck = MBANeck(
             in_channels=cfg.fpn_in,        # e.g., [128, 256, 512]
-            embed_dim=cfg.vis_dim,         # e.g., 512
-            n_heads=cfg.num_head           # number of attention heads
+            embed_dim=cfg.vis_dim,
+            text_dim=cfg.word_dim,         # e.g., 512
+            # n_heads=cfg.num_head           # number of attention heads
         )
 
         # Transformer decoder for refined features
@@ -70,7 +71,7 @@ class C_MARS(nn.Module):
         features = [vis_feats['res2'], vis_feats['res3'], vis_feats['res4']]
 
         # Fuse via MBA neck
-        fused = self.neck(features, word_embed)
+        fused, word_embed = self.neck(features, word_embed)
         if fused is None:
             raise ValueError("MBA neck returned None; expected Tensor")
 

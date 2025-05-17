@@ -235,7 +235,8 @@ class RefDataset(Dataset):
                 return img_t, word_vec, {
                     'mask_dir': [mask_path],
                     'inverse': [mat_inv],
-                    'ori_size': [np.array([h, w])]
+                    'ori_size': [np.array([h, w])],
+                    'source_type': [ref.get('source', None)],
                 }
             elif self.mode == 'test':
                 sent = str(random.choice(sents))
@@ -247,7 +248,9 @@ class RefDataset(Dataset):
                     'ori_size': [np.array([h, w])],
                     'sent': sent, 
                     'seg_id': torch.tensor(seg_id),
-                    'ori_img': torch.from_numpy(img)
+                    'ori_img': torch.from_numpy(img),
+                    'source_type': [ref.get('source', None)] * len(sents)
+
                 }
                 return img_t, word_vec, params
             else:

@@ -46,7 +46,7 @@ class CoordConv(nn.Module):
 
 class Projector(nn.Module):
     """Same as CRIS: transforms fused feature + text state into mask logits."""
-    def __init__(self, word_dim=1024, in_dim=256, kernel_size=3):
+    def __init__(self, word_dim=1024, in_dim=1024, kernel_size=3):
         super().__init__()
         self.k = kernel_size
         out_dim = in_dim * kernel_size * kernel_size + 1  # +bias
@@ -223,7 +223,7 @@ class MultiModalBlock(nn.Module):
 
 class MBANeck(nn.Module):
     """Multi‑scale Bidirectional Attention neck (concat + dynamic upsample)."""
-    def __init__(self, in_channels=[128,256,512], embed_dim=512, text_dim=640):
+    def __init__(self, in_channels=[1024, 1024, 1024], embed_dim=1024, text_dim=1024):
         super().__init__()
         self.v_proj = nn.ModuleList([nn.Conv2d(c, embed_dim, 1) for c in in_channels[::-1]])
         self.t_proj = nn.Linear(text_dim, embed_dim)

@@ -1,33 +1,34 @@
-# cris-r50.yaml
+MODEL:
+  CLIP_BACKBONE_TYPE: "vit"       
 DATA:
   dataset: ref-zom
-  train_lmdb: ./datasets/lmdb/ref-zom/train.lmdb
+  train_lmdb: ./datasets/lmdb/refcoco/train.lmdb
   train_split: train
-  val_lmdb: ./datasets/lmdb/ref-zom/val.lmdb
+  val_lmdb: ./datasets/lmdb/refcoco/val.lmdb
   val_split: val
   mask_root: ""
 
 TRAIN:
   input_size: 416
-  INPUT_SHAPE: [3, 416, 416]
+  INPUT_SHAPE: [3, 224, 224]
   word_len: 248
-  word_dim: 640
-  vis_dim: 640
-  fpn_in: [128, 256, 512]
+  word_dim: 512
+  vis_dim: 768
+  fpn_in: [768, 768, 768]
   fpn_out: [256, 640, 1024]
   sync_bn: True
-  num_layers: 4
+  num_layers: 3
   num_head: 8
   dim_ffn: 2048
   dropout: 0.1
   intermediate: False
-  workers: 4
-  workers_val: 4
+  workers: 8
+  workers_val: 8
   epochs: 50
   milestones: [10, 20]
   start_epoch: 0
-  batch_size: 4
-  batch_size_val: 4
+  batch_size: 72
+  batch_size_val: 72
   base_lr: 0.0001
   lr_decay: 0.1
   lr_multi: 0.1
@@ -36,7 +37,7 @@ TRAIN:
   manual_seed: 0
   print_freq: 100
   exp_name: ""
-  output_folder: exp/ref-zom
+  output_folder: exp/refcoco
   save_freq: 1
   weight: ""
   resume: ""
@@ -44,5 +45,5 @@ TRAIN:
 
 TEST:
   test_split: test
-  test_lmdb: datasets/lmdb/ref-zom/test.lmdb
+  test_lmdb: datasets/lmdb/ref-coco/test.lmdb
   visualize: False

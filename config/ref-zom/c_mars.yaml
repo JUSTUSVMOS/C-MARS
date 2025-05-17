@@ -1,3 +1,5 @@
+MODEL:
+  CLIP_BACKBONE_TYPE: "convnext"       
 DATA:
   dataset: ref-zom
   train_lmdb: ./datasets/lmdb/ref-zom/train.lmdb

@@ -93,6 +93,7 @@ for split_tag in ('train', 'test'):                 # Ref-ZOM 的 test 當 val
                 'seg_id'   : it['ann_id'],
                 'sents'    : sent_list,             # <<< 存整個句子列表
                 'num_sents': len(sent_list),
+                'source'   : it.get('source', None),
             }
             key = f'{idx:08d}'.encode()
             txn.put(key, pickle.dumps(ref))

@@ -5,7 +5,6 @@ This module provides training, validation, and inference routines for the segmen
 
 import os
 import time
-
 import cv2
 import numpy as np
 import torch
@@ -13,7 +12,6 @@ import torch.cuda.amp as amp
 import torch.nn.functional as F
 from tqdm import tqdm
 from loguru import logger
-
 from utils.dataset import tokenize
 from utils.misc import AverageMeter, trainMetricGPU
 
@@ -78,7 +76,6 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
                   f"IoU={iou_meter.avg:.2f} "
                   f"Prec50={prec_meter.avg:.2f} "
                   f"LR={lr_meter.avg:.6f}")
-
     scheduler.step()
 
 # ------------------------ Validation ------------------------ #
@@ -103,6 +100,7 @@ def validate(val_loader, model, epoch, args):
     cum_I, cum_U = 0.0, 0.0
     loader = tqdm(val_loader, desc=f"Validation {epoch}/{args.epochs}", ncols=100)
 
+    loader = tqdm(val_loader, desc=f"Validation {epoch}/{args.epochs}", ncols=100)
     for imgs, texts, params in loader:
         imgs = imgs.to(args.device, non_blocking=True)
         texts = texts.to(args.device, non_blocking=True)

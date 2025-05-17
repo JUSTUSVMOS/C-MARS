@@ -68,7 +68,10 @@ class C_MARS(nn.Module):
         word_embed, text_state = self.backbone.encode_text(word)
 
         # Prepare FPN inputs
-        features = [vis_feats['res2'], vis_feats['res3'], vis_feats['res4']]
+        if hasattr(self.backbone, "mode") and self.backbone.mode == "vit":
+            features = [vis_feats['vit_l1'], vis_feats['vit_l6'], vis_feats['vit_l11']]
+        else:
+            features = [vis_feats['res2'], vis_feats['res3'], vis_feats['res4']]
 
         # Fuse via MBA neck
         fused, word_embed = self.neck(features, word_embed)

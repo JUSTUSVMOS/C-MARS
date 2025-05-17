@@ -67,7 +67,7 @@ def main():
                            input_size=args.input_size,
                            word_length=args.word_len)
     test_loader = torch.utils.data.DataLoader(test_data,
-                                              batch_size=1,
+                                              batch_size=10,
                                               shuffle=False,
                                               num_workers=24,
                                               pin_memory=True)

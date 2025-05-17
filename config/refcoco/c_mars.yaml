@@ -10,7 +10,7 @@ DATA:
 TRAIN:
   input_size: 416
   INPUT_SHAPE: [3, 416, 416]
-  word_len: 17
+  word_len: 248
   word_dim: 640
   vis_dim: 640
   fpn_in: [128, 256, 512]

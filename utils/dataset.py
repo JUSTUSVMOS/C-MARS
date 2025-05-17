@@ -238,15 +238,18 @@ class RefDataset(Dataset):
                     'ori_size': [np.array([h, w])]
                 }
             elif self.mode == 'test':
+                sent = str(random.choice(sents))
+                tokens = tokenize(sent, self.word_length, truncate=True)
+                word_vec = tokens.squeeze(0)
                 params = {
-                    'mask_dir': mask_path,
-                    'inverse': mat_inv,
-                    'ori_size': np.array([h, w]),
-                    'sents': sents,
+                    'mask_dir': [mask_path],
+                    'inverse': [mat_inv],
+                    'ori_size': [np.array([h, w])],
+                    'sent': sent, 
                     'seg_id': torch.tensor(seg_id),
                     'ori_img': torch.from_numpy(img)
                 }
-                return img_t, params
+                return img_t, word_vec, params
             else:
                 # 'train'
                 return img_t, word_vec, mask_t

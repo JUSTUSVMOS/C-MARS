@@ -87,8 +87,17 @@ class C_MARS(nn.Module):
             # Resize ground-truth mask to match pred
             if mask is not None and pred.shape[-2:] != mask.shape[-2:]:
                 mask = F.interpolate(mask, pred.shape[-2:], mode='nearest').detach()
-            # Compute BCE loss
+            # Debug print
+            if torch.isnan(pred).any() or torch.isnan(mask).any():
+                print("[NaN DEBUG] pred/mask 有 nan！")
+                print("pred:", pred)
+                print("mask:", mask)
             loss = F.binary_cross_entropy_with_logits(pred, mask)
+            if torch.isnan(loss):
+                print("[NaN DEBUG] BCE loss is nan!")
+                print("pred min/max:", pred.min().item(), pred.max().item())
+                print("mask min/max:", mask.min().item(), mask.max().item())
             return pred.detach(), mask, loss
+
 
         return pred.detach()

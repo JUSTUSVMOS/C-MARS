@@ -2,15 +2,13 @@
 # │ Byte-compiled files and caches
 # └───────────────────────────────────────────────
 **/__pycache__/
-__pycache__/
 *.py[cod]
 *.so
 
 # ┌───────────────────────────────────────────────
-# │ Ref-ZOM mask cache
+# │ mask cache
 # └───────────────────────────────────────────────
-_cache/
-_cache/**
+**/_cache/
 
 # ┌───────────────────────────────────────────────
 # │ Data directories and archives

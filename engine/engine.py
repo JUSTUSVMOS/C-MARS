@@ -191,7 +191,7 @@ def validate(val_loader, model, epoch, args):
     else:
         return mean_iou, {}
 
-# ------------------------ Inference (with metrics) ------------------------ #
+# ------------------------------------------------ #
 @torch.no_grad()
 def inference(test_loader, model, args):
     """

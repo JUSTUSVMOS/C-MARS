@@ -14,7 +14,7 @@ from engine.engine import inference
 from model import build_segmenter
 from utils.dataset import RefDataset
 from utils.misc import setup_logger
-
+from train import safe_collate  
 warnings.filterwarnings("ignore")
 cv2.setNumThreads(0)
 
@@ -70,7 +70,9 @@ def main():
                                               batch_size=10,
                                               shuffle=False,
                                               num_workers=24,
-                                              pin_memory=True)
+                                              pin_memory=True,
+                                              collate_fn=safe_collate, 
+                                              )
 
     # build model
     model, _ = build_segmenter(args)

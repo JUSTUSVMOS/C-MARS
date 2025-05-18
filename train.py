@@ -32,14 +32,41 @@ torch.backends.cudnn.benchmark = True        # Enable cuDNN autotuner for perfor
 warnings.filterwarnings("ignore")            # Suppress all warnings
 cv2.setNumThreads(0)                         # Restrict OpenCV to a single thread
 
+from torch.utils.data.dataloader import default_collate
 
 def safe_collate(batch):
-    """
-    Filter out None entries (in case dataset returns None),
-    then use the default collate function.
-    """
     batch = [b for b in batch if b is not None]
-    return default_collate(batch) if batch else None
+    if not batch:
+        return None
+
+    first = batch[0]
+    L = len(first)
+
+    # ——— Validation (4‐fields) ———
+    if L == 4 and isinstance(first[2], torch.Tensor) and isinstance(first[3], dict):
+        imgs, txts, masks, params = zip(*batch)
+        imgs  = torch.stack(imgs, 0)
+        txts  = torch.stack(txts, 0)
+        masks = torch.stack(masks, 0)
+        batched = {k: [d[k] for d in params] for k in params[0]}
+        return imgs, txts, masks, batched
+
+    # ——— Training (3‐fields, third is Tensor) ———
+    if L == 3 and isinstance(first[2], torch.Tensor):
+        imgs, txts, masks = zip(*batch)
+        return torch.stack(imgs, 0), torch.stack(txts, 0), torch.stack(masks, 0)
+
+    # ——— Testing (3‐fields, third is dict) ———
+    if L == 3 and isinstance(first[2], dict):
+        imgs, txts, params = zip(*batch)
+        imgs = torch.stack(imgs, 0)
+        txts = torch.stack(txts, 0)
+        batched = {k: [d[k] for d in params] for k in params[0]}
+        return imgs, txts, batched
+
+    # Fallback
+    return default_collate(batch)
+
 
 
 def get_config():
@@ -112,6 +139,7 @@ def main():
     model.to(device)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.warning(f"Total trainable parameters: {total_params:,}")
+    # logger.info(model)
 
     # optimizer & scheduler
     optimizer = torch.optim.AdamW(

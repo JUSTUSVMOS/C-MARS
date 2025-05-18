@@ -1,4 +1,5 @@
-'''engine/engine.py
+'''
+engine/engine.py
 
 This module provides training, validation, and inference routines for the segmentation model.
 '''
@@ -19,13 +20,17 @@ from utils.misc import AverageMeter, trainMetricGPU
 def compute_iou(pred_bin: np.ndarray, mask_bin: np.ndarray, is_zero_case: bool):
     """
     Compute intersection, union, and zero-case accuracy.
+    Args:
+        pred_bin (np.ndarray): Predicted binary mask.
+        mask_bin (np.ndarray): Ground truth binary mask.
+        is_zero_case (bool): Whether this is a zero-case (no object) sample.
     Returns:
-        inter (float): intersection pixel count
-        union (float): union pixel count
-        acc0  (float): zero-case accuracy, or NaN for non-zero-case
+        inter (float): Intersection pixel count.
+        union (float): Union pixel count.
+        acc0 (float): Zero-case accuracy (if applicable), or NaN otherwise.
     """
     if is_zero_case:
-        # For zero-case (no object), return accuracy only
+        # For zero-case (no object), only accuracy is meaningful
         return 0.0, 0.0, float(pred_bin.sum() == 0)
     inter = np.logical_and(pred_bin, mask_bin).sum()
     union = np.logical_or(pred_bin, mask_bin).sum()
@@ -34,6 +39,9 @@ def compute_iou(pred_bin: np.ndarray, mask_bin: np.ndarray, is_zero_case: bool):
 
 # ------------------------ Training ------------------------ #
 def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
+    """
+    Run one epoch of training.
+    """
     batch_time = AverageMeter('Batch', ':2.2f')
     data_time  = AverageMeter('Data',  ':2.2f')
     lr_meter   = AverageMeter('LR',    ':1.6f')
@@ -88,67 +96,61 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
 # ------------------------ Validation ------------------------ #
 @torch.no_grad()
 def validate(val_loader, model, epoch, args):
+    """
+    Run validation over the dataset.
+    Logs and returns overall IoU, mean IoU (non-zero-case), zero-case accuracy,
+    and prints precision@50-90 for non-zero-case samples.
+    """
     model.eval()
     cum_I = cum_U = 0.0
     inter_list, union_list, acc0_list = [], [], []
     zero_case_count = 0
 
     loader = tqdm(val_loader, desc=f"Validation {epoch}/{args.epochs}", ncols=100)
-    for imgs, texts, params in loader:
-        imgs = imgs.to(args.device, non_blocking=True)
+    for batch in loader:
+        if len(batch) == 4:
+            imgs, texts, mask_ts, params = batch
+        else:
+            imgs, texts, params = batch
+            mask_ts = None
+
+        imgs  = imgs.to(args.device, non_blocking=True)
         texts = texts.to(args.device, non_blocking=True)
+
         preds = torch.sigmoid(model(imgs, texts))
         if preds.shape[-2:] != imgs.shape[-2:]:
             preds = F.interpolate(preds, size=imgs.shape[-2:], mode='bicubic', align_corners=True)
 
-        src_types = params.get('source_type', [''] * preds.shape[0])
+        src_types = params.get('source_type', [''] * preds.size(0))
         if isinstance(src_types, (str, int)):
-            src_types = [src_types] * preds.shape[0]
+            src_types = [src_types] * preds.size(0)
 
-        for pred, mpath, inv, sz, src in zip(
-            preds, params['mask_dir'], params['inverse'], params['ori_size'], src_types):
-
-            # Robust source type determination
-            if isinstance(src, (list, tuple)) and len(src) > 0:
-                src_str = src[0]
-            else:
-                src_str = src
-            is_zero = str(src_str).lower() == 'zero'
-
+        for i, pred in enumerate(preds):
             pred_np = pred.squeeze().cpu().numpy()
 
-            # Recover affine matrix
-            if isinstance(inv, torch.Tensor):
-                mat = inv[0].cpu().numpy()
-            elif isinstance(inv, list):
-                mat = inv[0]
-            else:
-                mat = inv
-            M_inv = np.asarray(mat, dtype=np.float32)
-            assert M_inv.shape == (2, 3)
+            src = src_types[i]
+            is_zero = str(src).lower() == 'zero'
 
-            # Recover original size
-            if isinstance(sz, torch.Tensor):
-                raw = sz[0] if sz.ndim > 1 else sz
-                sz0 = raw.cpu().numpy()
-            elif isinstance(sz, (list, tuple)):
-                raw = sz[0]
-                sz0 = raw.cpu().numpy() if isinstance(raw, torch.Tensor) else np.array(raw)
-            else:
-                arr = np.array(sz)
-                sz0 = arr[0] if arr.ndim > 1 else arr
-            h, w = int(sz0[0]), int(sz0[1])
+            inv = params['inverse'][i]
+            M_inv = (inv.cpu().numpy() if torch.is_tensor(inv) else np.asarray(inv, np.float32))
+            sz = params['ori_size'][i]
+            h, w = int(sz[0]), int(sz[1])
 
-            # Warp prediction back to original size and threshold
             pred_warp = cv2.warpAffine(pred_np, M_inv, (w, h), cv2.INTER_CUBIC) > 0.35
 
-            mask_path = mpath[0] if isinstance(mpath, (list, tuple)) else mpath
-            mask_raw = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            if mask_raw is None:
-                continue
-            mask_bin = (mask_raw.astype(np.float32) / 255.0) > 0.5
-            if pred_warp.shape != mask_bin.shape:
-                mask_bin = cv2.resize(mask_bin.astype(np.uint8), pred_warp.shape[::-1], cv2.INTER_NEAREST).astype(bool)
+            if mask_ts is not None:
+                m_np = mask_ts[i].cpu().numpy()
+                mask_bin = cv2.warpAffine(m_np, M_inv, (w, h), cv2.INTER_NEAREST) > 0.5
+            else:
+                mask_path = params['mask_dir'][i]
+                mask_raw  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                if mask_raw is None:
+                    continue
+                mask_bin = (mask_raw.astype(np.float32)/255.0) > 0.5
+                if pred_warp.shape != mask_bin.shape:
+                    mask_bin = cv2.resize(mask_bin.astype(np.uint8),
+                                           pred_warp.shape[::-1],
+                                           cv2.INTER_NEAREST).astype(bool)
 
             inter, union, acc0 = compute_iou(pred_warp, mask_bin, is_zero)
 
@@ -156,87 +158,109 @@ def validate(val_loader, model, epoch, args):
                 zero_case_count += 1
                 if not np.isnan(acc0):
                     acc0_list.append(acc0)
-                # Skip adding inter/union for zero-case
                 continue
 
-            # Accumulate metrics for non-zero-case
             if not np.isnan(inter):
                 inter_list.append(inter)
                 union_list.append(union)
                 cum_I += inter
                 cum_U += union
 
-    mean_iou = np.mean([i/(u+1e-6) for i, u in zip(inter_list, union_list)]) if inter_list else 0.0
+    mean_iou  = np.mean([i/(u+1e-6) for i,u in zip(inter_list, union_list)]) if inter_list else 0.0
     overall   = cum_I / (cum_U + 1e-6) if cum_U > 0 else 0.0
     mean_acc0 = float(np.mean(acc0_list)) if acc0_list else 0.0
 
+    logger.info(f"[Val] Overall IoU    = {overall*100:.2f}%")
+    logger.info(f"[Val] Mean IoU       = {mean_iou*100:.2f}%")
     if getattr(args, 'dataset', '') == 'ref-zom':
-        logger.info(f"[Val] Overall IoU    = {overall*100:.2f}%")
-        logger.info(f"[Val] Mean IoU       = {mean_iou*100:.2f}%")
         logger.info(f"[Val] Zero-case acc  = {mean_acc0*100:.2f}%")
         logger.info(f"[Val] Zero-case count= {zero_case_count}")
+
+    # ---- Print Pr@50~Pr@90 for non-zero cases ----
+    if inter_list and union_list:
+        ious = np.array([i / (u + 1e-6) for i, u in zip(inter_list, union_list)])
+        for t in range(5, 10):
+            pr = (ious > t / 10).mean()
+            logger.info(f"[Val] Pr@{t}0 = {pr * 100:.2f}%")
+    else:
+        for t in range(5, 10):
+            logger.info(f"[Val] Pr@{t}0 = 0.00%")
+
+    if getattr(args, 'dataset', '') == 'ref-zom':
         return overall, {}
     else:
-        logger.info(f"[Val] Mean IoU       = {mean_iou*100:.2f}%")
         return mean_iou, {}
 
-# ------------------------ Inference ------------------------ #
+# ------------------------ Inference (with metrics) ------------------------ #
 @torch.no_grad()
 def inference(test_loader, model, args):
+    """
+    Run inference on test data and compute metrics.
+    Logs and returns overall IoU, mean IoU (non-zero-case), zero-case accuracy,
+    and precision@90/80/70/60/50.
+    """
     model.eval()
     cum_I = cum_U = 0.0
-    inter_list, union_list, acc0_list = [], [], []
+    iou_list = []
+    acc0_list = []
+    zero_case_count = 0
+
+    thresholds = [0.9, 0.8, 0.7, 0.6, 0.5]
+    pr_counts = {t: 0 for t in thresholds}
+    total_non_zero = 0
 
     loader = tqdm(test_loader, desc='Inference', ncols=100)
-    for img, params in loader:
-        img = img.to(args.device, non_blocking=True)
-        mask_path = params['mask_dir'][0]
-        mask_raw = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask_raw is None:
-            continue
-        mask_bin = (mask_raw.astype(np.float32) / 255.0) > 0.5
+    for imgs, txts, mask_ts, params in loader:
+        B = imgs.size(0)
+        imgs   = imgs.to(args.device, non_blocking=True)
+        txts   = txts.to(args.device, non_blocking=True)
 
-        mat = params['inverse'][0]
-        M_inv = np.asarray(mat, dtype=np.float32)
-        sz_arr = np.array(params['ori_size'][0])
-        h, w = int(sz_arr[0]), int(sz_arr[1])
+        # Forward once per batch
+        preds = torch.sigmoid(model(imgs, txts))
+        preds = preds.squeeze(1).cpu().numpy()
 
-        sents = params['sents']
-        src_types = params.get('source_type', [''] * len(sents))
-        for sent, src in zip(sents, src_types):
-            text = tokenize(sent, args.word_len, True).to(args.device)
-            pred = torch.sigmoid(model(img, text)).squeeze(0)
-            if pred.shape[-2:] != img.shape[-2:]:
-                pred = F.interpolate(pred.unsqueeze(0), size=img.shape[-2:], mode='bicubic', align_corners=True).squeeze(0)
-
-            pred_np   = pred.cpu().numpy()
+        for i in range(B):
+            pred_np = preds[i]
+            # Recover affine matrix and original size
+            inv = params['inverse'][i]
+            M_inv = inv  if isinstance(inv, np.ndarray) else inv.cpu().numpy()
+            h, w  = params['ori_size'][i]
             pred_warp = cv2.warpAffine(pred_np, M_inv, (w, h), cv2.INTER_CUBIC) > 0.35
 
+            src = params['source_type'][i]
             is_zero = str(src).lower() == 'zero'
-            inter, union, acc0 = compute_iou(pred_warp, mask_bin, is_zero)
 
+            # GT mask
+            m_np = mask_ts[i].numpy()
+            gt = cv2.warpAffine(m_np, M_inv, (w, h), cv2.INTER_NEAREST) > 0.5
+
+            # Compute
+            inter, union, acc0 = compute_iou(pred_warp, gt, is_zero)
             if is_zero:
-                if not np.isnan(acc0):
-                    acc0_list.append(acc0)
-                # Skip inter/union accumulation for zero-case
-                continue
-
-            if not np.isnan(inter):
-                inter_list.append(inter)
-                union_list.append(union)
+                zero_case_count += 1
+                acc0_list.append(acc0)
+            else:
+                total_non_zero += 1
+                iou = inter/(union+1e-6)
+                iou_list.append(iou)
                 cum_I += inter
                 cum_U += union
+                for t in thresholds:
+                    if iou >= t:
+                        pr_counts[t] += 1
 
-    mean_iou  = float(np.sum(inter_list) / (np.sum(union_list) + 1e-6)) if union_list else 0.0
-    overall   = cum_I / (cum_U + 1e-6) if cum_U > 0 else 0.0
+    # Summary
+    mean_iou  = float(np.mean(iou_list)) if iou_list else 0.0
+    overall   = cum_I / (cum_U + 1e-6)   if cum_U > 0 else 0.0
     mean_acc0 = float(np.mean(acc0_list)) if acc0_list else 0.0
+    pr = {f"PR@{int(t*100)}": pr_counts[t]/total_non_zero if total_non_zero>0 else 0.0
+          for t in thresholds}
 
     logger.info("=> Inference Metrics <=")
-    if getattr(args, 'dataset', '') == 'ref-zom':
-        logger.info(f"[Test] Overall IoU   = {overall*100:.2f}%")
-        logger.info(f"[Test] Mean IoU      = {mean_iou*100:.2f}%")
-        logger.info(f"[Test] Zero-case acc = {mean_acc0*100:.2f}%")
-        return overall, {}
-    else:
-        logger.info(f"[Test] Mean IoU      = {mean_iou*100:.2f}%")
-        return mean_iou, {}
+    logger.info(f"[Test] overall_IoU   = {overall*100:.2f}%")
+    logger.info(f"[Test] mean_IoU      = {mean_iou*100:.2f}%")
+    logger.info(f"[Test] zero-case acc = {mean_acc0*100:.2f}%")
+    for name, val in pr.items():
+        logger.info(f"[Test] {name} = {val*100:.2f}%")
+
+    return mean_iou, pr

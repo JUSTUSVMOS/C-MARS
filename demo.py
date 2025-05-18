@@ -8,11 +8,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # 加载配置文件和模型
-cfg = config.load_cfg_from_cfg_file("./config/ref-zom/cris_r50.yaml")
+cfg = config.load_cfg_from_cfg_file("./config/ref-zom/c_mars.yaml")
 PATH = "exp/ref-zom/last_model.pth"
 model, _ = build_segmenter(cfg)
 checkpoint = torch.load(PATH, map_location=torch.device('cpu'))
-model.load_state_dict(checkpoint['state_dict'], strict=True)
+model.load_state_dict(checkpoint['state_dict'], strict=False)
 model.eval()
 print("=> Loaded checkpoint '{}'".format(PATH))
 

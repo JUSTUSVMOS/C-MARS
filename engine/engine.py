@@ -15,25 +15,30 @@ from loguru import logger
 from utils.dataset import tokenize
 from utils.misc import AverageMeter, trainMetricGPU
 
+
+def compute_iou(pred_bin: np.ndarray, mask_bin: np.ndarray, is_zero_case: bool):
+    """
+    Compute intersection, union, and zero-case accuracy.
+    Returns:
+        inter (float): intersection pixel count
+        union (float): union pixel count
+        acc0  (float): zero-case accuracy, or NaN for non-zero-case
+    """
+    if is_zero_case:
+        # For zero-case (no object), return accuracy only
+        return 0.0, 0.0, float(pred_bin.sum() == 0)
+    inter = np.logical_and(pred_bin, mask_bin).sum()
+    union = np.logical_or(pred_bin, mask_bin).sum()
+    return inter, union, np.nan
+
+
 # ------------------------ Training ------------------------ #
 def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
-    """
-    Execute one epoch of training.
-
-    Args:
-        train_loader: DataLoader for training data.
-        model: PyTorch model to train.
-        optimizer: Optimizer for model updates.
-        scheduler: Learning rate scheduler.
-        scaler: GradScaler for mixed precision.
-        epoch: Current epoch number.
-        args: Arguments namespace with settings.
-    """
     batch_time = AverageMeter('Batch', ':2.2f')
-    data_time = AverageMeter('Data', ':2.2f')
-    lr_meter   = AverageMeter('LR', ':1.6f')
-    loss_meter = AverageMeter('Loss', ':2.4f')
-    iou_meter  = AverageMeter('IoU', ':2.2f')
+    data_time  = AverageMeter('Data',  ':2.2f')
+    lr_meter   = AverageMeter('LR',    ':1.6f')
+    loss_meter = AverageMeter('Loss',  ':2.4f')
+    iou_meter  = AverageMeter('IoU',   ':2.2f')
     prec_meter = AverageMeter('Prec@50', ':2.2f')
 
     model.train()
@@ -47,8 +52,9 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
     )
 
     for idx, (img, txt, tgt) in enumerate(train_loader, start=1):
+        assert img is not None, f"batch {idx} img is None"
         data_time.update(time.time() - end)
-        img, txt, tgt = (x.to(args.device, non_blocking=True) for x in (img, txt, tgt))
+        img, txt, tgt = [x.to(args.device, non_blocking=True) for x in (img, txt, tgt)]
         tgt = tgt.unsqueeze(1)
 
         with amp.autocast():
@@ -78,27 +84,14 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
                   f"LR={lr_meter.avg:.6f}")
     scheduler.step()
 
+
 # ------------------------ Validation ------------------------ #
 @torch.no_grad()
 def validate(val_loader, model, epoch, args):
-    """
-    Execute validation over the dataset.
-    Returns overall IoU, mean IoU (excl zero-case) and zero-case accuracy for ref-zom, or mean IoU otherwise, plus precision dict.
-    """
-    def first_element(x):
-        if isinstance(x, (list, tuple)):
-            return x[0]
-        if torch.is_tensor(x) and x.ndim:
-            return x[0]
-        if isinstance(x, np.ndarray) and x.ndim:
-            return x[0]
-        return x
-
     model.eval()
-    iou_list = []
-    acc_list = []
-    cum_I, cum_U = 0.0, 0.0
-    loader = tqdm(val_loader, desc=f"Validation {epoch}/{args.epochs}", ncols=100)
+    cum_I = cum_U = 0.0
+    inter_list, union_list, acc0_list = [], [], []
+    zero_case_count = 0
 
     loader = tqdm(val_loader, desc=f"Validation {epoch}/{args.epochs}", ncols=100)
     for imgs, texts, params in loader:
@@ -108,120 +101,142 @@ def validate(val_loader, model, epoch, args):
         if preds.shape[-2:] != imgs.shape[-2:]:
             preds = F.interpolate(preds, size=imgs.shape[-2:], mode='bicubic', align_corners=True)
 
-        for pred, mask_path, inv_mat, orig_size in zip(preds, params['mask_dir'], params['inverse'], params['ori_size']):
-            h, w = map(int, first_element(orig_size))
-            M = np.array(first_element(inv_mat))
+        src_types = params.get('source_type', [''] * preds.shape[0])
+        if isinstance(src_types, (str, int)):
+            src_types = [src_types] * preds.shape[0]
+
+        for pred, mpath, inv, sz, src in zip(
+            preds, params['mask_dir'], params['inverse'], params['ori_size'], src_types):
+
+            # Robust source type determination
+            if isinstance(src, (list, tuple)) and len(src) > 0:
+                src_str = src[0]
+            else:
+                src_str = src
+            is_zero = str(src_str).lower() == 'zero'
+
             pred_np = pred.squeeze().cpu().numpy()
-            pred_warped = (cv2.warpAffine(pred_np, M, (w, h), flags=cv2.INTER_CUBIC) > 0.35)
 
-            mask = cv2.imread(first_element(mask_path), cv2.IMREAD_GRAYSCALE)
-            if mask is None:
+            # Recover affine matrix
+            if isinstance(inv, torch.Tensor):
+                mat = inv[0].cpu().numpy()
+            elif isinstance(inv, list):
+                mat = inv[0]
+            else:
+                mat = inv
+            M_inv = np.asarray(mat, dtype=np.float32)
+            assert M_inv.shape == (2, 3)
+
+            # Recover original size
+            if isinstance(sz, torch.Tensor):
+                raw = sz[0] if sz.ndim > 1 else sz
+                sz0 = raw.cpu().numpy()
+            elif isinstance(sz, (list, tuple)):
+                raw = sz[0]
+                sz0 = raw.cpu().numpy() if isinstance(raw, torch.Tensor) else np.array(raw)
+            else:
+                arr = np.array(sz)
+                sz0 = arr[0] if arr.ndim > 1 else arr
+            h, w = int(sz0[0]), int(sz0[1])
+
+            # Warp prediction back to original size and threshold
+            pred_warp = cv2.warpAffine(pred_np, M_inv, (w, h), cv2.INTER_CUBIC) > 0.35
+
+            mask_path = mpath[0] if isinstance(mpath, (list, tuple)) else mpath
+            mask_raw = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if mask_raw is None:
                 continue
-            mask = mask.astype(np.float32) / 255.0
-            if pred_warped.shape != mask.shape:
-                mask = cv2.resize(mask, pred_warped.shape[::-1], interpolation=cv2.INTER_NEAREST)
+            mask_bin = (mask_raw.astype(np.float32) / 255.0) > 0.5
+            if pred_warp.shape != mask_bin.shape:
+                mask_bin = cv2.resize(mask_bin.astype(np.uint8), pred_warp.shape[::-1], cv2.INTER_NEAREST).astype(bool)
 
-            # zero-case handling
-            if mask.sum() == 0:
-                acc_list.append(1.0 if pred_warped.sum() == 0 else 0.0)
+            inter, union, acc0 = compute_iou(pred_warp, mask_bin, is_zero)
+
+            if is_zero:
+                zero_case_count += 1
+                if not np.isnan(acc0):
+                    acc0_list.append(acc0)
+                # Skip adding inter/union for zero-case
                 continue
 
-            inter = np.logical_and(pred_warped, mask).sum()
-            union = np.logical_or(pred_warped, mask).sum()
-            iou_list.append(inter / (union + 1e-6))
-            cum_I += inter
-            cum_U += union
+            # Accumulate metrics for non-zero-case
+            if not np.isnan(inter):
+                inter_list.append(inter)
+                union_list.append(union)
+                cum_I += inter
+                cum_U += union
 
-    precision = {}
-    if iou_list:
-        ious_tensor = torch.tensor(iou_list, device=args.device)
-        mean_iou = ious_tensor.mean().item()
-        precision = {f'Pr@{t}0': (ious_tensor > t/10).float().mean().item() for t in range(5, 10)}
-    else:
-        mean_iou = 0.0
-
-    overall_iou = cum_I / (cum_U + 1e-6) if cum_U > 0 else 0.0
-    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
+    mean_iou = np.mean([i/(u+1e-6) for i, u in zip(inter_list, union_list)]) if inter_list else 0.0
+    overall   = cum_I / (cum_U + 1e-6) if cum_U > 0 else 0.0
+    mean_acc0 = float(np.mean(acc0_list)) if acc0_list else 0.0
 
     if getattr(args, 'dataset', '') == 'ref-zom':
-        logger.info(f"Overall IoU   = {overall_iou*100:.2f}%")
-        logger.info(f"Mean IoU      = {mean_iou*100:.2f}%")
-        logger.info(f"Zero-case acc = {mean_acc*100:.2f}%")
-        return overall_iou, precision
+        logger.info(f"[Val] Overall IoU    = {overall*100:.2f}%")
+        logger.info(f"[Val] Mean IoU       = {mean_iou*100:.2f}%")
+        logger.info(f"[Val] Zero-case acc  = {mean_acc0*100:.2f}%")
+        logger.info(f"[Val] Zero-case count= {zero_case_count}")
+        return overall, {}
     else:
-        logger.info(f"Mean IoU      = {mean_iou*100:.2f}%")
-        return mean_iou, precision
+        logger.info(f"[Val] Mean IoU       = {mean_iou*100:.2f}%")
+        return mean_iou, {}
 
 # ------------------------ Inference ------------------------ #
 @torch.no_grad()
 def inference(test_loader, model, args):
-    """
-    Run inference on test data and compute metrics.
-    Returns overall IoU, mean IoU (excl zero-case) and zero-case accuracy for ref-zom, or mean IoU otherwise.
-    """
-    def first_element(x):
-        if isinstance(x, (list, tuple)):
-            return x[0]
-        if torch.is_tensor(x) and x.ndim:
-            return x[0]
-        if isinstance(x, np.ndarray) and x.ndim:
-            return x[0]
-        return x
-
     model.eval()
-    iou_list = []
-    acc_list = []
-    cum_I, cum_U = 0.0, 0.0
+    cum_I = cum_U = 0.0
+    inter_list, union_list, acc0_list = [], [], []
+
     loader = tqdm(test_loader, desc='Inference', ncols=100)
+    for img, params in loader:
+        img = img.to(args.device, non_blocking=True)
+        mask_path = params['mask_dir'][0]
+        mask_raw = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask_raw is None:
+            continue
+        mask_bin = (mask_raw.astype(np.float32) / 255.0) > 0.5
 
-    for imgs, texts, params in loader:
-        imgs = imgs.to(args.device, non_blocking=True)
-        texts = texts.to(args.device, non_blocking=True)
-        preds = torch.sigmoid(model(imgs, texts))
-        if preds.shape[-2:] != imgs.shape[-2:]:
-            preds = F.interpolate(preds, size=imgs.shape[-2:], mode='bicubic', align_corners=True)
+        mat = params['inverse'][0]
+        M_inv = np.asarray(mat, dtype=np.float32)
+        sz_arr = np.array(params['ori_size'][0])
+        h, w = int(sz_arr[0]), int(sz_arr[1])
 
-        for pred, mask_path, inv_mat, orig_size in zip(preds, params['mask_dir'], params['inverse'], params['ori_size']):
-            h, w = map(int, first_element(orig_size))
-            M = np.array(first_element(inv_mat))
-            pred_np = pred.squeeze().cpu().numpy()
-            pred_warped = (cv2.warpAffine(pred_np, M, (w, h), flags=cv2.INTER_CUBIC) > 0.35)
+        sents = params['sents']
+        src_types = params.get('source_type', [''] * len(sents))
+        for sent, src in zip(sents, src_types):
+            text = tokenize(sent, args.word_len, True).to(args.device)
+            pred = torch.sigmoid(model(img, text)).squeeze(0)
+            if pred.shape[-2:] != img.shape[-2:]:
+                pred = F.interpolate(pred.unsqueeze(0), size=img.shape[-2:], mode='bicubic', align_corners=True).squeeze(0)
 
-            mask = cv2.imread(first_element(mask_path), cv2.IMREAD_GRAYSCALE)
-            if mask is None:
+            pred_np   = pred.cpu().numpy()
+            pred_warp = cv2.warpAffine(pred_np, M_inv, (w, h), cv2.INTER_CUBIC) > 0.35
+
+            is_zero = str(src).lower() == 'zero'
+            inter, union, acc0 = compute_iou(pred_warp, mask_bin, is_zero)
+
+            if is_zero:
+                if not np.isnan(acc0):
+                    acc0_list.append(acc0)
+                # Skip inter/union accumulation for zero-case
                 continue
-            mask = mask.astype(np.float32) / 255.0
-            if pred_warped.shape != mask.shape:
-                mask = cv2.resize(mask, pred_warped.shape[::-1], interpolation=cv2.INTER_NEAREST)
 
-            # zero-case handling
-            if mask.sum() == 0:
-                acc_list.append(1.0 if pred_warped.sum() == 0 else 0.0)
-                continue
+            if not np.isnan(inter):
+                inter_list.append(inter)
+                union_list.append(union)
+                cum_I += inter
+                cum_U += union
 
-            inter = np.logical_and(pred_warped, mask).sum()
-            union = np.logical_or(pred_warped, mask).sum()
-            iou_list.append(inter / (union + 1e-6))
-            cum_I += inter
-            cum_U += union
+    mean_iou  = float(np.sum(inter_list) / (np.sum(union_list) + 1e-6)) if union_list else 0.0
+    overall   = cum_I / (cum_U + 1e-6) if cum_U > 0 else 0.0
+    mean_acc0 = float(np.mean(acc0_list)) if acc0_list else 0.0
 
-    precision = {}
-    if iou_list:
-        ious_tensor = torch.tensor(iou_list, device=args.device)
-        mean_iou = ious_tensor.mean().item()
-        precision = {f'Pr@{t}0': (ious_tensor > t/10).float().mean().item() for t in range(5, 10)}
-    else:
-        mean_iou = 0.0
-
-    overall_iou = cum_I / (cum_U + 1e-6) if cum_U > 0 else 0.0
-    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
-
-    logger.info('=> Inference Metrics <=')
+    logger.info("=> Inference Metrics <=")
     if getattr(args, 'dataset', '') == 'ref-zom':
-        logger.info(f"Overall IoU   = {overall_iou*100:.2f}%")
-        logger.info(f"Mean IoU      = {mean_iou*100:.2f}%")
-        logger.info(f"Zero-case acc = {mean_acc*100:.2f}%")
-        return overall_iou, precision
+        logger.info(f"[Test] Overall IoU   = {overall*100:.2f}%")
+        logger.info(f"[Test] Mean IoU      = {mean_iou*100:.2f}%")
+        logger.info(f"[Test] Zero-case acc = {mean_acc0*100:.2f}%")
+        return overall, {}
     else:
-        logger.info(f"Mean IoU      = {mean_iou*100:.2f}%")
-        return mean_iou, precision
+        logger.info(f"[Test] Mean IoU      = {mean_iou*100:.2f}%")
+        return mean_iou, {}

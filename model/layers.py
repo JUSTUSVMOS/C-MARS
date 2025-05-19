@@ -12,7 +12,6 @@ def conv_layer(in_dim, out_dim, kernel_size=1, padding=0, stride=1):
         nn.GELU()
     )
 
-
 def linear_layer(in_dim, out_dim, bias=False):
     return nn.Sequential(
         nn.Linear(in_dim, out_dim, bias),
@@ -20,8 +19,7 @@ def linear_layer(in_dim, out_dim, bias=False):
         nn.GELU()
     )
 
-
-# ---------- CoordConv  (used in original CRIS) ----------
+# ---------- CoordConv (used in original CRIS) ----------
 
 class CoordConv(nn.Module):
     """Conv2d + (x,y) coordinate channels."""
@@ -40,7 +38,6 @@ class CoordConv(nn.Module):
 
     def forward(self, x):
         return self.conv(self._add_coord(x))
-
 
 # ---------- Projector (dynamic per‑sample conv) ----------
 
@@ -69,7 +66,6 @@ class Projector(nn.Module):
         weight = weight.reshape(B, C, self.k, self.k)
         out = F.conv2d(x, weight, bias=bias, padding=self.k // 2, groups=B)
         return out.transpose(0, 1)                        # (B,1,H,W)
-
 
 # ---------- Transformer Decoder (unchanged CRIS version) ----------
 
@@ -149,108 +145,115 @@ class TransformerDecoderLayer(nn.Module):
         v = v + self.drop(self.ffn(self.norm3(v)))
         return v
 
-# ---------- Bidirectional Cross‑Attention Block with MBA Text->Image ----------
+# ---------- MBA Block ----------
+
 class MultiModalBlock(nn.Module):
     """Multi-scale Text→Image cross-attention only, with softmax-normalized λ."""
     def __init__(self, v_dim, t_dim, scales=(1, 3, 5)):
         super().__init__()
         self.scales = scales
-        # Q is projected from visual features, K/V from text tokens
         self.q_lin  = nn.Linear(v_dim, v_dim)
         self.k_txt  = nn.Linear(t_dim, v_dim)
         self.v_txt  = nn.Linear(t_dim, v_dim)
-        # Initialize λ parameters to zeros so that softmax yields uniform weights initially
         self.lambda_r = nn.Parameter(torch.zeros(len(scales)))
-        # Scaling factor for attention scores
         self.scale    = v_dim ** -0.5
 
     def _window_pool(self, v: torch.Tensor, k: int) -> torch.Tensor:
-        """
-        Apply average pooling with kernel size k to each channel, 
-        padded so output stays the same spatial dimensions.
-        If k=1, return the feature unchanged.
-        """
         if k == 1:
             return v
         pad = k // 2
         return F.avg_pool2d(v, kernel_size=k, stride=1, padding=pad)
 
     def forward(self, v_feat: torch.Tensor, t_tok: torch.Tensor):
-        """
-        Args:
-            v_feat: Visual feature map of shape (B, C, H, W)
-            t_tok : Text token embeddings of shape (B, L, Ct)
-
-        Returns:
-            Updated visual features and unchanged text tokens:
-            - v_feat': (B, C, H, W)
-            - t_tok : (B, L, Ct)
-        """
         B, C, H, W = v_feat.shape
         N = H * W
-
-        # Project text tokens to get keys and values
         k_txt = self.k_txt(t_tok)  # (B, L, C)
         v_txt = self.v_txt(t_tok)  # (B, L, C)
-
-        # Normalize λ across scales so they sum to 1
         weights = F.softmax(self.lambda_r, dim=0)  # (num_scales,)
-
-        # Accumulate multi-scale attention outputs
         agg = 0
         for idx, k in enumerate(self.scales):
-            # Pool visual feature in a k×k window (or leave as is if k=1)
             v_pool = self._window_pool(v_feat, k)           # (B, C, H, W)
             v_flat = v_pool.view(B, C, N).permute(0, 2, 1)   # (B, N, C)
             q      = self.q_lin(v_flat)                     # (B, N, C)
-
-            # Compute attention logits and distribution
             attn_logits = torch.einsum('bnc,blc->bnl', q, k_txt) * self.scale  # (B, N, L)
             attn        = attn_logits.softmax(dim=-1)                        # (B, N, L)
-
-            # Weight text values by attention and sum
             attn_out    = torch.einsum('bnl,blc->bnc', attn, v_txt)           # (B, N, C)
-
-            # Weighted by normalized λ for this scale
             agg = agg + weights[idx] * attn_out
-
-        # Reshape back to feature map and add residual to v_feat
         out_vis = agg.permute(0, 2, 1).view(B, C, H, W)  # (B, C, H, W)
         return v_feat + out_vis, t_tok
 
+# ---------- Mask2Former-style MBA Neck (ViT/CNN compatible) ----------
 
-# ---------- MBA Neck (concat version) ----------
-
-class MBANeck(nn.Module):
-    """Multi‑scale Bidirectional Attention neck (concat + dynamic upsample)."""
-    def __init__(self, in_channels=[1024, 1024, 1024], embed_dim=1024, text_dim=1024):
+class DownsampleConv(nn.Module):
+    """可堆疊的下採樣模組，n次即stride=2^n"""
+    def __init__(self, in_dim, out_dim, n_down):
         super().__init__()
-        self.v_proj = nn.ModuleList([nn.Conv2d(c, embed_dim, 1) for c in in_channels[::-1]])
-        self.t_proj = nn.Linear(text_dim, embed_dim)
-        self.blocks = nn.ModuleList([
-            MultiModalBlock(embed_dim, embed_dim) for _ in range(3)
+        layers = []
+        for _ in range(n_down):
+            layers.append(nn.Conv2d(in_dim, out_dim, 3, stride=2, padding=1, bias=False))
+            layers.append(nn.GroupNorm(32, out_dim))
+            layers.append(nn.GELU())
+        self.model = nn.Sequential(*layers) if layers else nn.Identity()
+
+    def forward(self, x):
+        return self.model(x)
+
+class MBANeck_Mask2FormerStyle(nn.Module):
+    """
+    Mask2Former-style fake multi-scale MBA neck, for ViT (fake downsample) or CNN (native multi-scale).
+    Args:
+        in_channels: list of int, backbone features' channels.
+        embed_dim: output dim for all feature projections.
+        text_dim: text embedding dim.
+        scales: MBA multi-scale kernel sizes.
+        mba_block_cls: MBA block class (default: MultiModalBlock)
+        fake_downsample: bool, whether to apply stride-2 conv fake downsampling (for ViT).
+    """
+    def __init__(self, in_channels=[768, 768, 768], embed_dim=768, text_dim=512, 
+                 scales=(1,3,5), mba_block_cls=None, fake_downsample=False):
+        super().__init__()
+        self.n_branch = len(in_channels)
+        self.embed_dim = embed_dim
+        self.fake_downsample = fake_downsample
+
+        self.proj = nn.ModuleList([
+            nn.Conv2d(in_ch, embed_dim, 1) for in_ch in in_channels
+        ])
+        self.down = nn.ModuleList([
+            DownsampleConv(embed_dim, embed_dim, n_down) if fake_downsample else nn.Identity()
+            for n_down in range(self.n_branch)
+        ])
+        MBA_Block = mba_block_cls if mba_block_cls is not None else MultiModalBlock
+        self.mba = nn.ModuleList([
+            MBA_Block(embed_dim, text_dim, scales=scales) for _ in range(self.n_branch)
         ])
         self.merge_conv = nn.Sequential(
-            nn.Conv2d(embed_dim*3, embed_dim, 1, bias=False),
-            nn.BatchNorm2d(embed_dim),
+            nn.Conv2d(embed_dim * self.n_branch, embed_dim, 1, bias=False),
+            nn.GroupNorm(32, embed_dim),
             nn.GELU()
         )
         self.out_conv = nn.Sequential(
             nn.Conv2d(embed_dim, embed_dim, 3, padding=1, bias=False),
-            nn.BatchNorm2d(embed_dim),
+            nn.GroupNorm(32, embed_dim),
             nn.GELU()
         )
 
     def forward(self, feats, txt_tok):
-        txt_tok = self.t_proj(txt_tok)
-        up_feats = []
-        target_size = feats[0].shape[-2:]
-        for v, proj, blk in zip(feats[::-1], self.v_proj, self.blocks):
-            v = proj(v)
-            v, txt_tok = blk(v, txt_tok)
-            v_up = F.interpolate(v, size=target_size, mode='bilinear', align_corners=False)
-            up_feats.append(v_up)
-        fused = torch.cat(up_feats, dim=1)
+        # feats: list of [B, C, H, W], text: [B, L, C]
+        B, _, H, W = feats[0].shape
+        out_feats = []
+        for i, (x, proj, down, mba) in enumerate(zip(feats, self.proj, self.down, self.mba)):
+            x = proj(x)
+            x = down(x)
+            x, txt_tok = mba(x, txt_tok)
+            if x.shape[-2:] != (H, W):
+                x = F.interpolate(x, size=(H, W), mode='bilinear', align_corners=False)
+            out_feats.append(x)
+        fused = torch.cat(out_feats, dim=1)
         fused = self.merge_conv(fused)
-        fused = F.avg_pool2d(fused, kernel_size=2, stride=2)
+        fused = self.out_conv(fused)
+        target_size = 32    
+        if fused.shape[-2] > target_size:
+            fused = F.interpolate(fused, size=(target_size, target_size), mode='bilinear', align_corners=False)
+    
         return fused, txt_tok
